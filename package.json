@@ -1,0 +1,112 @@
+{
+  "name": "paxzas-vscode",
+  "displayName": "Paxzas CUDA Analyzer",
+  "description": "Local PTX/SASS fast analysis inside VS Code (no Python, no network).",
+  "version": "0.0.1",
+  "publisher": "paxzas",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:cudaAnalyzer.run",
+    "onCommand:paxzas.analyzeActiveFile",
+    "onCommand:paxzas.analyzeSelectedFile",
+    "onCommand:paxzas.analyzeWithLaunchSpec"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "check": "npm run compile",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "cudaAnalyzer.run",
+        "title": "Run CUDA Kernel Analysis"
+      },
+      {
+        "command": "paxzas.analyzeActiveFile",
+        "title": "Paxzas: Analyze Active CUDA File"
+      },
+      {
+        "command": "paxzas.analyzeSelectedFile",
+        "title": "Paxzas: Analyze Selected CUDA File"
+      },
+      {
+        "command": "paxzas.analyzeWithLaunchSpec",
+        "title": "Paxzas: Analyze CUDA File with Launch Spec"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "paxzas.analyzeSelectedFile",
+          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
+          "group": "navigation"
+        },
+        {
+          "command": "paxzas.analyzeWithLaunchSpec",
+          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
+          "group": "navigation"
+        },
+        {
+          "command": "cudaAnalyzer.run",
+          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "paxzas.analyzeActiveFile",
+          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
+          "group": "navigation"
+        },
+        {
+          "command": "paxzas.analyzeWithLaunchSpec",
+          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
+          "group": "navigation"
+        },
+        {
+          "command": "cudaAnalyzer.run",
+          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "cudaAnalyzer.run",
+          "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Paxzas CUDA Analyzer",
+      "properties": {
+        "paxzas.gpuPreset": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "ampere-like-default",
+            "a100",
+            "rtx-4090"
+          ],
+          "description": "GPU specs for occupancy heuristics. \"auto\" uses nvidia-smi when available, otherwise Ampere-like defaults."
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.3"
+  }
+}
