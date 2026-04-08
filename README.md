@@ -30,8 +30,13 @@ npm test
 ### Package a `.vsix`
 
 ```bash
-npm run compile
-npx @vscode/vsce package
+./build-vsix.sh
+```
+
+or:
+
+```bash
+npm run vsix
 ```
 
 Install in VS Code: **Extensions → … → Install from VSIX…**

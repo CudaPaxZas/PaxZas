@@ -23,7 +23,8 @@
     "watch": "tsc -watch -p .",
     "check": "npm run compile",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "vsix": "npm install && npm run compile && npx --yes @vscode/vsce package"
   },
   "contributes": {
     "commands": [
