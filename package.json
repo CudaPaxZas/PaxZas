@@ -24,13 +24,14 @@
     "check": "npm run compile",
     "test": "vitest run",
     "test:watch": "vitest",
-    "vsix": "npm install && npm run compile && npx --yes @vscode/vsce package"
+    "vsix": "npm install && npm run compile && npx --yes @vscode/vsce package --allow-missing-repository --skip-license"
   },
   "contributes": {
     "commands": [
       {
         "command": "cudaAnalyzer.run",
-        "title": "Run CUDA Kernel Analysis"
+        "title": "Run CUDA Kernel Analysis",
+        "icon": "$(play)"
       },
       {
         "command": "paxzas.analyzeActiveFile",
@@ -78,6 +79,18 @@
           "command": "cudaAnalyzer.run",
           "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
           "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "cudaAnalyzer.run",
+          "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass || resourceExtname == .s",
+          "group": "navigation"
+        },
+        {
+          "command": "paxzas.analyzeWithLaunchSpec",
+          "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass || resourceExtname == .s",
+          "group": "navigation@2"
         }
       ],
       "commandPalette": [

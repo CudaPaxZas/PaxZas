@@ -1,27 +1,75 @@
-/** Per-SM limits for occupancy heuristics: architecture tables + device SM count from nvidia-smi. */
+/**
+ * GPU architecture specifications and configuration management.
+ *
+ * This module provides:
+ * 1. **Architecture Table** (GPU_SM_CONFIGS): Per-SM resource limits for each
+ *    NVIDIA compute capability (CC 7.0-12.0, covering Volta through Blackwell)
+ * 2. **SM Count Detection**: Queries nvidia-smi for GPU presence and device count
+ * 3. **Preset Resolution**: Converts flexible config strings (e.g., "auto", "a100")
+ *    to complete GpuSpec with both architecture and device count
+ * 4. **Occupancy Analysis**: Enables occupancy calculations with authoritative limits
+ *
+ * Architecture dimensions defined:
+ * - smMaxThreads: Max concurrent threads per SM (GPU-dependent: 1024-2048)
+ * - smMaxBlocks: Max concurrent blocks per SM (16-32)
+ * - smMaxRegisters: Register file size per SM (64K 32-bit regs)
+ * - smMaxSharedMem: Shared memory per SM (64 KB - 228 KB)
+ * - warpSize: Threads per warp (always 32 for modern NVIDIA)
+ * - Allocation units: Granularity of shared memory and register allocation
+ *
+ * Example use:
+ * - resolveGpuSpecForAnalysis("auto") -> probes device and adapts
+ * - gpuSpecFromArch("8.0", 108) -> A100 configuration (CC 8.0, 108 SMs)
+ * - getPreset("rtx-4090") -> RTX 4090 preset (CC 8.9, 128 SMs)
+ */
 
 import {
   queryFirstGpuFromNvidiaSmi,
   RESOLUTION_SMI_NOT_PRESENT,
   RESOLUTION_SMI_PROBE_FAILED,
 } from "./nvidia_smi";
+import { detectSmCountLocally } from "./local_cuda_detect";
 
+/**
+ * Complete GPU specification: architecture limits + device info.
+ *
+ * Architecture limits (per SM) determine occupancy and resource constraints.
+ * smCount is device-specific (number of SMs on the GPU).
+ * Together they enable occupancy calculation for a specific hardware/kernel pair.
+ */
 export interface GpuSpec {
-  name: string;
-  smMaxThreads: number;
-  smMaxBlocks: number;
-  smMaxSharedMem: number;
-  smMaxRegisters: number;
-  warpSize: number;
-  smMaxWarps: number | undefined;
-  regAllocUnitPerWarp: number;
-  sharedMemAllocUnit: number;
-  minSharedPerBlockAlloc: number;
-  smCount: number | undefined;
+  name: string;              // Human-readable GPU/arch name (e.g., "ampere-sm80")
+  smMaxThreads: number;      // Max threads per SM (threads/block constraint)
+  smMaxBlocks: number;       // Max concurrent blocks per SM (hard limit)
+  smMaxSharedMem: number;    // Total shared memory per SM (bytes)
+  smMaxRegisters: number;    // Total register file per SM (32-bit registers)
+  warpSize: number;          // Threads per warp (32 on modern NVIDIA)
+  smMaxWarps: number | undefined;  // Max warps per SM (explicit or computed)
+  regAllocUnitPerBlock: number;   // Register allocation granule per block (32-bit regs)
+  regAllocUnitPerWarp: number;    // Register allocation granule per warp (bytes)
+  sharedMemAllocUnit: number;     // Shared memory allocation granule (bytes)
+  minSharedPerBlockAlloc: number; // Minimum shared allocation per block (bytes)
+  smCount: number | undefined;    // Number of SMs on device (device-specific)
 }
 
+/**
+ * Architecture limits without device SM count.
+ * Used for architecture table entries (smCount added per-device).
+ */
 export type GpuArchLimits = Omit<GpuSpec, "smCount">;
 
+/**
+ * Supported compute capability versions (keys for architecture table).
+ * Maps to NVIDIA architecture generations:
+ * 7.0: Volta (V100, etc.)
+ * 7.5: Turing (T4, RTX 20 series, etc.)
+ * 8.0: Ampere (A100, etc.)
+ * 8.6: Ampere mobile/small (RTX 30 desktop series limit, etc.)
+ * 8.9: Ada (RTX 40 series)
+ * 9.0: Hopper (H100, H200)
+ * 10.0: Blackwell datacenter (B200, GB200)
+ * 12.0: Blackwell consumer (RTX 50 series)
+ */
 export type GpuComputeCapabilityKey =
   | "7.0"
   | "7.5"
@@ -29,9 +77,31 @@ export type GpuComputeCapabilityKey =
   | "8.6"
   | "8.9"
   | "9.0"
-  | "10.0";
+  | "10.0"
+  | "12.0";
 
-/** Per compute-capability SM limits (PTX .target / SMI compute_cap). smCount comes from nvidia-smi. */
+/**
+ * Architecture specification table: per-SM resource limits for each compute capability.
+ *
+ * Values from:
+ * - NVIDIA CUDA Programming Guide (compute capability appendix)
+ * - NVIDIA Tuning Guides (architecture-specific)
+ *
+ * Key design notes:
+ * - All modern GPUs: warpSize = 32, regAllocUnitPerBlock = 256, sharedMemAllocUnit = 256
+ * - Maxwell+ (cc 5.3): Shared memory allocation minimum (minSharedPerBlockAlloc)
+ * - Ampere+ (cc 8.0): Support for dynamic shared memory
+ *
+ * Per compute capability (CC):
+ * - Volta (CC 7.0): 2048 threads/SM, 64 W/SM, 96 KB shared, 65K regs (HPC-focused)
+ * - Turing (CC 7.5): 1024 threads/SM, 32 W/SM, 64 KB shared (cost/efficiency trade-off)
+ * - Ampere (CC 8.0): 2048 threads/SM, 64 W/SM, 164 KB shared (high-end datacenter)
+ * - Ampere Mobile (CC 8.6): 1536 threads/SM, 48 W/SM, 100 KB shared (mobile/RTX 30)
+ * - Ada (CC 8.9): 1536 threads/SM, 48 W/SM, 100 KB shared (efficiency-optimized)
+ * - Hopper (CC 9.0): 2048 threads/SM, 64 W/SM, 228 KB shared (Transformer scaling)
+ * - Blackwell DC (CC 10.0): 2048 threads/SM, 64 W/SM, 228 KB shared (Hopper-equivalent)
+ * - Blackwell Consumer (CC 12.0): 1536 threads/SM, 48 W/SM, 100 KB shared (RTX 50 series)
+ */
 export const GPU_SM_CONFIGS: Record<GpuComputeCapabilityKey, GpuArchLimits> = {
   "7.0": {
     name: "volta-sm70",
@@ -40,6 +110,7 @@ export const GPU_SM_CONFIGS: Record<GpuComputeCapabilityKey, GpuArchLimits> = {
     warpSize: 32,
     smMaxBlocks: 32,
     smMaxRegisters: 65536,
+    regAllocUnitPerBlock: 256,
     regAllocUnitPerWarp: 256,
     smMaxSharedMem: 96 * 1024,
     sharedMemAllocUnit: 256,
@@ -52,6 +123,7 @@ export const GPU_SM_CONFIGS: Record<GpuComputeCapabilityKey, GpuArchLimits> = {
     warpSize: 32,
     smMaxBlocks: 16,
     smMaxRegisters: 65536,
+    regAllocUnitPerBlock: 256,
     regAllocUnitPerWarp: 256,
     smMaxSharedMem: 64 * 1024,
     sharedMemAllocUnit: 256,
@@ -64,6 +136,7 @@ export const GPU_SM_CONFIGS: Record<GpuComputeCapabilityKey, GpuArchLimits> = {
     warpSize: 32,
     smMaxBlocks: 32,
     smMaxRegisters: 65536,
+    regAllocUnitPerBlock: 256,
     regAllocUnitPerWarp: 256,
     smMaxSharedMem: 164 * 1024,
     sharedMemAllocUnit: 256,
@@ -76,6 +149,7 @@ export const GPU_SM_CONFIGS: Record<GpuComputeCapabilityKey, GpuArchLimits> = {
     warpSize: 32,
     smMaxBlocks: 16,
     smMaxRegisters: 65536,
+    regAllocUnitPerBlock: 256,
     regAllocUnitPerWarp: 256,
     smMaxSharedMem: 100 * 1024,
     sharedMemAllocUnit: 256,
@@ -88,6 +162,7 @@ export const GPU_SM_CONFIGS: Record<GpuComputeCapabilityKey, GpuArchLimits> = {
     warpSize: 32,
     smMaxBlocks: 24,
     smMaxRegisters: 65536,
+    regAllocUnitPerBlock: 256,
     regAllocUnitPerWarp: 256,
     smMaxSharedMem: 100 * 1024,
     sharedMemAllocUnit: 256,
@@ -100,6 +175,7 @@ export const GPU_SM_CONFIGS: Record<GpuComputeCapabilityKey, GpuArchLimits> = {
     warpSize: 32,
     smMaxBlocks: 32,
     smMaxRegisters: 65536,
+    regAllocUnitPerBlock: 256,
     regAllocUnitPerWarp: 256,
     smMaxSharedMem: 228 * 1024,
     sharedMemAllocUnit: 256,
@@ -119,8 +195,28 @@ export const GPU_SM_CONFIGS: Record<GpuComputeCapabilityKey, GpuArchLimits> = {
     warpSize: 32,
     smMaxBlocks: 32,
     smMaxRegisters: 65536,
+    regAllocUnitPerBlock: 256,
     regAllocUnitPerWarp: 256,
     smMaxSharedMem: 228 * 1024,
+    sharedMemAllocUnit: 256,
+    minSharedPerBlockAlloc: 256,
+  },
+  /**
+   * Blackwell consumer CC 12.0 (RTX 50 series / RTX PRO 4000 Blackwell, `.target sm_120`,
+   * SMI compute_cap 12.0). Occupancy limits match GB20x architecture: 48 warps/SM, 1536
+   * threads/SM, 24 blocks/SM, 65536 32-bit regs/SM, 100 KB shared/SM.
+   * (verify via CUDA Programming Guide — compute capabilities if you need exact granularity).
+   */
+  "12.0": {
+    name: "blackwell-sm120",
+    smMaxThreads: 1536,
+    smMaxWarps: 48,
+    warpSize: 32,
+    smMaxBlocks: 24,
+    smMaxRegisters: 65536,
+    regAllocUnitPerBlock: 256,
+    regAllocUnitPerWarp: 256,
+    smMaxSharedMem: 100 * 1024,
     sharedMemAllocUnit: 256,
     minSharedPerBlockAlloc: 256,
   },
@@ -130,7 +226,7 @@ export const GPU_COMPUTE_CAPABILITY_KEYS = Object.keys(
   GPU_SM_CONFIGS
 ) as GpuComputeCapabilityKey[];
 
-/** When PTX and SMI are both missing or unusable for CC. */
+/** Default fallback compute capability when PTX and SMI targets are unavailable. */
 export const DEFAULT_FALLBACK_CC: GpuComputeCapabilityKey = "8.6";
 
 export const AMPERE_LIKE_DEFAULT: GpuSpec = {
@@ -138,12 +234,14 @@ export const AMPERE_LIKE_DEFAULT: GpuSpec = {
   smCount: undefined,
 };
 
+/** Named preset configurations (human-friendly config values). */
 const PRESET_ARCH: Record<string, GpuComputeCapabilityKey> = {
   "ampere-like-default": "8.6",
   a100: "8.0",
   "rtx-4090": "8.9",
 };
 
+/** Named preset SM counts (device-specific). */
 const PRESET_SM_COUNT: Record<string, number | undefined> = {
   "ampere-like-default": undefined,
   a100: 108,
@@ -152,6 +250,121 @@ const PRESET_SM_COUNT: Record<string, number | undefined> = {
 
 export const KNOWN_PRESET_KEYS = Object.keys(PRESET_ARCH).sort() as string[];
 
+/**
+ * GPU name pattern -> SM count heuristic.
+ * Used when nvidia-smi reports device name but not SM count.
+ * Applied in order; first match wins.
+ */
+interface NameToSmCountRule {
+  pattern: RegExp;
+  smCount: number;
+}
+
+/**
+ * Heuristic rules to infer SM count from device name string.
+ * Updated as new GPU models appear; covers datacenter (A-series) and consumer (RTX) lines.
+ */
+const NAME_TO_SM_COUNT_RULES: readonly NameToSmCountRule[] = [
+  // Datacenter A-series
+  { pattern: /\bA100\b/i, smCount: 108 },
+  { pattern: /\bA30\b/i, smCount: 56 },
+  { pattern: /\bA40\b/i, smCount: 84 },
+  { pattern: /\bA10\b/i, smCount: 72 },
+  
+  // L-series (learning)
+  { pattern: /\bL4\b/i, smCount: 58 },
+  { pattern: /\bL40S\b/i, smCount: 142 },
+  { pattern: /\bL40\b/i, smCount: 142 },
+  
+  // Older datacenter
+  { pattern: /\bV100\b/i, smCount: 80 },
+  { pattern: /\bT4\b/i, smCount: 40 },
+  
+  // Consumer RTX 40 series (Ampere generation)
+  { pattern: /\bRTX\s*4090\b/i, smCount: 128 },
+  { pattern: /\bRTX\s*4080\b/i, smCount: 76 },
+  { pattern: /\bRTX\s*4070\s*Ti\b/i, smCount: 60 },
+  { pattern: /\bRTX\s*4070\b/i, smCount: 46 },
+  
+  // Consumer RTX 30 series (Ampere generation)
+  { pattern: /\bRTX\s*3090\b/i, smCount: 82 },
+  { pattern: /\bRTX\s*3080\b/i, smCount: 68 },
+  { pattern: /\bRTX\s*3070\b/i, smCount: 46 },
+  { pattern: /\bRTX\s*3060\b/i, smCount: 28 },
+  
+  // H-series (Hopper datacenter)
+  { pattern: /\bH100\b/i, smCount: 120 },
+  { pattern: /\bH200\b/i, smCount: 132 },
+  
+  // B-series (Blackwell datacenter)
+  { pattern: /\bB200\b/i, smCount: 192 },
+];
+
+/**
+ * Infers SM count from GPU name using regex pattern matching.
+ * Returns undefined if no rule matches.
+ *
+ * Example: "NVIDIA A100-PCIE-40GB" -> 108
+ *
+ * @param name GPU name string from nvidia-smi or CUDA API
+ * @returns SM count if recognized, else undefined
+ */
+export function inferSmCountFromGpuName(name: string): number | undefined {
+  const model = name.trim();
+  if (!model) {
+    return undefined;
+  }
+  const rule = NAME_TO_SM_COUNT_RULES.find((r) => r.pattern.test(model));
+  return rule?.smCount;
+}
+
+/**
+ * Internal: Extracts SM count from nvidia-smi query result.
+ *
+ * nvidia-smi can provide multiprocessor_count (number of SMs).
+ * If available, that's our most authoritative source.
+ * Also tracks which source provided the SM count (for resolution string).
+ *
+ * @param probed Result from queryFirstGpuFromNvidiaSmi()
+ * @returns SM count + source attribution
+ */
+function resolveSmCountAndSource(
+  probed: Awaited<ReturnType<typeof queryFirstGpuFromNvidiaSmi>>
+): {
+  smCount: number | undefined;
+  source:
+    | "smi.multiprocessor_count"
+    | "name.heuristic"
+    | "local.cache"
+    | "local.cuda.detect"
+    | "unknown";
+} {
+  if (!probed.ok) {
+    return { smCount: undefined, source: "unknown" };
+  }
+  if (probed.row.multiprocessor_count != null) {
+    return {
+      smCount: probed.row.multiprocessor_count,
+      source: "smi.multiprocessor_count",
+    };
+  }
+  return { smCount: undefined, source: "unknown" };
+}
+
+/**
+ * Loads a named GPU preset configuration.
+ *
+ * Known presets (case-insensitive):
+ * - "ampere-like-default": CC 8.6, undefined SM count
+ * - "a100": CC 8.0, 108 SMs
+ * - "rtx-4090": CC 8.9, 128 SMs
+ *
+ * Throws error if preset not found.
+ *
+ * @param name Preset name (case-insensitive)
+ * @returns Corresponding GpuSpec
+ * @throws Error if name not in presets
+ */
 export function getPreset(name: string): GpuSpec {
   const key = name.trim().toLowerCase();
   const cc = PRESET_ARCH[key];
@@ -163,6 +376,16 @@ export function getPreset(name: string): GpuSpec {
   return gpuSpecFromArch(cc, PRESET_SM_COUNT[key]);
 }
 
+/**
+ * Constructs GpuSpec from architecture key and optional SM count.
+ *
+ * Copies all architecture limits from GPU_SM_CONFIGS[cc] and adds device SM count.
+ * Used when you have compute capability and SM count independently.
+ *
+ * @param cc Compute capability key (7.0, 8.0, 8.6, etc.)
+ * @param smCount Optional: number of SMs on device (undefined if unknown)
+ * @returns Complete GpuSpec combining architecture + device info
+ */
 export function gpuSpecFromArch(
   cc: GpuComputeCapabilityKey,
   smCount: number | undefined
@@ -170,24 +393,38 @@ export function gpuSpecFromArch(
   return { ...GPU_SM_CONFIGS[cc], smCount: smCount ?? undefined };
 }
 
-/** Map PTX `.target sm_XX` to our CC key (undefined if unknown). */
-export function parsePtxSmTargetVersion(ptx: string): number | undefined {
-  const m = /\.target\s+sm_(\d+)/i.exec(ptx);
-  return m ? parseInt(m[1]!, 10) : undefined;
-}
-
+/**
+ * Maps SM version numbers from NVIDIA to our compute capability keys.
+ * SM version = last 2 or 3 digits from `.target sm_XX` directive.
+ * Example: sm_80 -> 80 -> "8.0" (Ampere)
+ */
 const SM_VERSION_TO_CC: Partial<Record<number, GpuComputeCapabilityKey>> = {
-  70: "7.0",
-  75: "7.5",
-  80: "8.0",
-  86: "8.6",
-  87: "8.6",
-  89: "8.9",
-  90: "9.0",
-  /** CC 10.0 datacenter Blackwell; use SMI/CC for 10.3 / 12.x PTX targets not listed here. */
+  70: "7.0",  // Volta
+  75: "7.5",  // Turing
+  80: "8.0",  // Ampere
+  86: "8.6",  // Ampere mobile
+  87: "8.6",  // Ampere mobile variant (maps to 8.6)
+  89: "8.9",  // Ada
+  90: "9.0",  // Hopper
+  /** CC 10.0 datacenter Blackwell (B200/GB200). */
   100: "10.0",
+  /** CC 12.0 consumer Blackwell (RTX 50 series / RTX PRO 4000 Blackwell). */
+  120: "12.0",
 };
 
+/**
+ * Extracts compute capability from PTX `.target` directive and maps to architecture key.
+ *
+ * Process:
+ * 1. Parse PTX text for `.target sm_XX` directive (regex match)
+ * 2. Convert sm_XX number to compute capability key
+ * 3. Return key or undefined if parsing fails
+ *
+ * Example: "... .target sm_80 ..." -> "8.0" (Ampere)
+ *
+ * @param ptx PTX text containing `.target` directive
+ * @returns Compute capability key, or undefined if not found or unrecognized
+ */
 export function ccKeyFromPtxTarget(ptx: string): GpuComputeCapabilityKey | undefined {
   const sm = parsePtxSmTargetVersion(ptx);
   if (sm === undefined) {
@@ -196,7 +433,19 @@ export function ccKeyFromPtxTarget(ptx: string): GpuComputeCapabilityKey | undef
   return SM_VERSION_TO_CC[sm];
 }
 
-/** Normalize SMI `compute_cap` string to a table key. */
+/**
+ * Converts nvidia-smi's `compute_cap` string (e.g., "8.0") to architecture key.
+ *
+ * nvidia-smi reports compute capability as major.minor (e.g., "8.0", "8.6").
+ * This function parses and validates, returning corresponding architecture table key.
+ *
+ * Example: "8.0" -> "8.0" (Ampere high-end)
+ * Example: "8.6" -> "8.6" (Ampere mobile)
+ * Example: "9.9" -> undefined (unsupported version)
+ *
+ * @param s Compute capability string from nvidia-smi
+ * @returns Architecture key if recognized, else undefined
+ */
 export function computeCapToArchKey(s: string): GpuComputeCapabilityKey | undefined {
   const n = parseFloat(s.trim());
   if (!Number.isFinite(n)) {
@@ -206,24 +455,67 @@ export function computeCapToArchKey(s: string): GpuComputeCapabilityKey | undefi
   return k in GPU_SM_CONFIGS ? k : undefined;
 }
 
+/**
+ * Result of GPU specification resolution with explanation string.
+ * Used to provide users with details about how the config was determined.
+ */
 export interface GpuSpecResolution {
-  spec: GpuSpec;
-  resolution: string;
-}
-
-export interface ResolveGpuSpecOptions {
-  /** When set and contains `.target sm_XX`, drives arch table; sm_count still from SMI in auto mode. */
-  ptxText?: string;
+  spec: GpuSpec;          // Final GPU specification (architecture + SM count)
+  resolution: string;     // Human-readable explanation of how spec was determined
 }
 
 /**
- * @param presetKey - VS Code: `auto` uses PTX CC + GPU_SM_CONFIGS and nvidia-smi for sm_count; else named preset.
+ * Options for GPU specification resolution.
+ * Allows fallback strategies when primary sources are unavailable.
+ */
+export interface ResolveGpuSpecOptions {
+  /** 
+   * When set and contains `.target sm_XX`, uses PTX compute capability.
+   * In "auto" mode, this drives architecture selection while SM count comes from nvidia-smi.
+   */
+  ptxText?: string;
+  
+  /** 
+   * When true and nvidia-smi cannot provide SM count, attempt one-shot local CUDA 
+   * compilation/run for direct SM count detection. Uses cache to avoid re-running.
+   * Fallback strategy when nvidia-smi is unavailable.
+   */
+  enableLocalCudaDetect?: boolean;
+}
+
+/**
+ * Resolves complete GPU specification from multiple sources in priority order.
+ *
+ * Preset Mode (presetKey != "auto"):
+ * - Directly returns named preset (e.g., "a100", "rtx-4090")
+ * - No device probing needed
+ * - Resolution string: "preset:{key}"
+ *
+ * Auto Mode (presetKey == "auto"):
+ * - Attempts multi-source detection:
+ *   1. Extract CC from PTX `.target` (if provided)
+ *   2. Probe nvidia-smi for device name + compute capability
+ *   3. If SM count missing, try local CUDA detection (optional)
+ *   4. If SM count still missing, infer from device name heuristics
+ *   5. Fall back to DEFAULT_FALLBACK_CC (8.6 Ampere) if nothing found
+ *
+ * Priority for architecture:
+ * PTX CC > nvidia-smi CC > DEFAULT_FALLBACK_CC
+ *
+ * Priority for SM count:
+ * nvidia-smi > local CUDA detect > name heuristic > undefined
+ *
+ * @param presetKey Config value from user: "auto", "a100", "rtx-4090", etc.
+ * @param options Optional: PTX text and local detection flag
+ * @returns GpuSpec + resolution explanation string
  */
 export async function resolveGpuSpecForAnalysis(
   presetKey: string,
   options: ResolveGpuSpecOptions = {}
 ): Promise<GpuSpecResolution> {
   const key = presetKey.trim().toLowerCase();
+  
+  // Handle named presets
   if (key && key !== "auto") {
     return {
       spec: getPreset(key),
@@ -231,22 +523,49 @@ export async function resolveGpuSpecForAnalysis(
     };
   }
 
+  // Auto mode: multi-source detection
+  
+  // 1. Extract CC from PTX if available
   const ptxCc = options.ptxText
     ? ccKeyFromPtxTarget(options.ptxText)
     : undefined;
+  
+  // 2. Query nvidia-smi for device + CC + SM count
   const probed = await queryFirstGpuFromNvidiaSmi();
-  const smCount =
-    probed.ok && probed.row.multiprocessor_count != null
-      ? probed.row.multiprocessor_count
-      : undefined;
+  let { smCount, source: smCountSource } = resolveSmCountAndSource(probed);
 
+  // 3. If SM count missing and local detection enabled, try CUDA detection
+  if (smCount === undefined && options.enableLocalCudaDetect) {
+    const local = await detectSmCountLocally({
+      expectedName: probed.ok ? probed.row.name : undefined,
+      expectedComputeCap: probed.ok ? probed.row.compute_cap : undefined,
+    });
+    if (local) {
+      smCount = local.smCount;
+      smCountSource = local.source;
+    }
+  }
+
+  // 4. If SM count still missing, use name heuristic
+  if (smCount === undefined && probed.ok) {
+    const inferred = inferSmCountFromGpuName(probed.row.name);
+    if (inferred !== undefined) {
+      smCount = inferred;
+      smCountSource = "name.heuristic";
+    }
+  }
+
+  // 5. Determine final architecture and resolution string
+  
+  // Case A: PTX CC found + device detected via nvidia-smi
   if (ptxCc && probed.ok) {
     return {
       spec: gpuSpecFromArch(ptxCc, smCount),
-      resolution: `ptx:${GPU_SM_CONFIGS[ptxCc].name} sm_count:${smCount ?? "?"} device:${probed.row.name} (SMI CC ${probed.row.compute_cap})`,
+      resolution: `ptx:${GPU_SM_CONFIGS[ptxCc].name} sm_count:${smCount ?? "?"} (${smCountSource}) device:${probed.row.name} (SMI CC ${probed.row.compute_cap})`,
     };
   }
 
+  // Case B: PTX CC found but nvidia-smi failed
   if (ptxCc && !probed.ok) {
     const tag =
       probed.reason === "not_present"
@@ -258,15 +577,17 @@ export async function resolveGpuSpecForAnalysis(
     };
   }
 
+  // Case C: nvidia-smi detected device but no PTX CC
   if (probed.ok) {
     const smiCc =
       computeCapToArchKey(probed.row.compute_cap) ?? DEFAULT_FALLBACK_CC;
     return {
       spec: gpuSpecFromArch(smiCc, smCount),
-      resolution: `device:${probed.row.name} (CC ${probed.row.compute_cap}) → ${GPU_SM_CONFIGS[smiCc].name} sm_count:${smCount ?? "?"}`,
+      resolution: `device:${probed.row.name} (CC ${probed.row.compute_cap}) → ${GPU_SM_CONFIGS[smiCc].name} sm_count:${smCount ?? "?"} (${smCountSource})`,
     };
   }
 
+  // Case D: All sources failed - use fallback
   return {
     spec: gpuSpecFromArch(DEFAULT_FALLBACK_CC, undefined),
     resolution:
@@ -274,4 +595,22 @@ export async function resolveGpuSpecForAnalysis(
         ? RESOLUTION_SMI_NOT_PRESENT
         : RESOLUTION_SMI_PROBE_FAILED,
   };
+}
+
+/**
+ * Extracts SM version number from PTX `.target sm_XX` directive.
+ *
+ * The `.target` directive in PTX specifies minimum compute capability:
+ * Example: ".target sm_80" (Ampere)
+ * Parsed SM number: 80 -> "8.0" (via SM_VERSION_TO_CC table)
+ *
+ * Regex: /\.target\s+sm_(\d+)/i
+ * Returns: captured numeric part, or undefined if not found
+ *
+ * @param ptx PTX IR text
+ * @returns SM version number (e.g., 80), or undefined
+ */
+export function parsePtxSmTargetVersion(ptx: string): number | undefined {
+  const m = /\.target\s+sm_(\d+)/i.exec(ptx);
+  return m ? parseInt(m[1]!, 10) : undefined;
 }

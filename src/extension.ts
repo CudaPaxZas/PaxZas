@@ -1,6 +1,9 @@
 import * as vscode from "vscode";
 import { analyze, type AnalyzerReport } from "./analyzer/analyze";
-import { findCudaArtifactUris } from "./cuda_artifacts";
+import {
+  findCudaArtifactUris,
+  findSupplementalSassForPtx,
+} from "./cuda_artifacts";
 
 const OUTPUT_CHANNEL_ID = "cudaAnalyzer";
 
@@ -18,6 +21,23 @@ function isSupportedDocument(doc: vscode.TextDocument): boolean {
 async function readFileText(uri: vscode.Uri): Promise<string> {
   const bytes = await vscode.workspace.fs.readFile(uri);
   return new TextDecoder("utf-8").decode(bytes);
+}
+
+async function supplementalSassForPtx(
+  sourceUri: vscode.Uri | undefined
+): Promise<string | undefined> {
+  if (!sourceUri || sourceUri.scheme !== "file") {
+    return undefined;
+  }
+  const ext = sourceUri.fsPath.toLowerCase();
+  if (!ext.endsWith(".ptx")) {
+    return undefined;
+  }
+  const sassUri = await findSupplementalSassForPtx(sourceUri);
+  if (!sassUri) {
+    return undefined;
+  }
+  return readFileText(sassUri);
 }
 
 /** Prefer disk read for clean `file:` docs (single decode); buffer if dirty or virtual. */
@@ -109,14 +129,15 @@ function formatSummary(r: AnalyzerReport, meta?: { path?: string; ms?: number })
 export async function runAnalysisOnText(
   text: string,
   displayPath: string,
-  launch?: Partial<Record<"threads" | "shared" | "registers", number>>
+  launch?: Partial<Record<"threads" | "shared" | "registers", number>>,
+  supplementalSass?: string
 ): Promise<void> {
   const t0 = Date.now();
   const result = await analyze(
     text,
     launch ?? {},
     undefined,
-    undefined,
+    supplementalSass,
     gpuPresetFromSettings()
   );
   const ms = Date.now() - t0;
@@ -147,7 +168,8 @@ async function runCudaAnalyzeCommand(uri?: vscode.Uri): Promise<void> {
       async () => {
         await new Promise<void>((r) => setImmediate(r));
         const text = await readFileText(uri);
-        await runAnalysisOnText(text, uri.fsPath);
+        const supplementalSass = await supplementalSassForPtx(uri);
+        await runAnalysisOnText(text, uri.fsPath, undefined, supplementalSass);
       }
     );
     return;
@@ -165,7 +187,13 @@ async function runCudaAnalyzeCommand(uri?: vscode.Uri): Promise<void> {
         await new Promise<void>((r) => setImmediate(r));
         const doc = editor.document;
         const text = await textFromDocument(doc);
-        await runAnalysisOnText(text, doc.uri.fsPath || doc.fileName);
+        const supplementalSass = await supplementalSassForPtx(doc.uri);
+        await runAnalysisOnText(
+          text,
+          doc.uri.fsPath || doc.fileName,
+          undefined,
+          supplementalSass
+        );
       }
     );
     return;
@@ -215,7 +243,13 @@ async function runCudaAnalyzeCommand(uri?: vscode.Uri): Promise<void> {
     async () => {
       await new Promise<void>((r) => setImmediate(r));
       const text = await readFileText(picked!);
-      await runAnalysisOnText(text, picked!.fsPath);
+      const supplementalSass = await supplementalSassForPtx(picked!);
+      await runAnalysisOnText(
+        text,
+        picked!.fsPath,
+        undefined,
+        supplementalSass
+      );
     }
   );
 }
@@ -253,9 +287,11 @@ export function activate(context: vscode.ExtensionContext): void {
         const launch = parseLaunchSpec(spec);
         let pathLabel = "";
         let text: string;
+        let supplementalSass: string | undefined;
         if (uri) {
           text = await readFileText(uri);
           pathLabel = uri.fsPath;
+          supplementalSass = await supplementalSassForPtx(uri);
         } else {
           const doc = vscode.window.activeTextEditor?.document;
           if (!doc) {
@@ -263,13 +299,14 @@ export function activate(context: vscode.ExtensionContext): void {
           }
           pathLabel = doc.uri.fsPath || doc.fileName;
           text = await textFromDocument(doc);
+          supplementalSass = await supplementalSassForPtx(doc.uri);
         }
         const t0 = Date.now();
         const r = await analyze(
           text,
           launch,
           undefined,
-          undefined,
+          supplementalSass,
           gpuPresetFromSettings()
         );
         const ms = Date.now() - t0;

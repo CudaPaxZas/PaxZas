@@ -14,6 +14,8 @@ import { mergeLaunchWithHints } from "./merge_launch";
 import { resolveGpuSpecForAnalysis } from "./gpu_spec";
 import type { PtxKernelHints } from "./ptx_parse";
 import { runModelsParallelOrSync } from "./run_models_parallel";
+import { diagnoseKernel } from "./diagnose";
+import type { DiagnosisResult } from "./diagnose";
 
 function hasPtxEntry(ptx: string): boolean {
   return /\.(?:visible\s+)?entry\s+\S+\s*\(/.test(ptx);
@@ -53,6 +55,8 @@ export interface AnalyzerReport {
   ptx_multi_kernel_note?: string;
   /** How GpuSpec was chosen: settings preset, nvidia-smi, or default fallback. */
   gpu_spec_resolution?: string;
+  /** Cross-model diagnosis: primary bottleneck, stall profile, optimisation plan. */
+  diagnosis?: DiagnosisResult;
 }
 
 function hintsToPublic(h: PtxKernelHints | null): AnalyzerReport["ptx_hints"] {
@@ -83,7 +87,10 @@ export async function analyze(
 ): Promise<AnalyzerReport> {
   const ptxForGpuSpec = hasPtxEntry(text) ? text : undefined;
   const { spec, resolution: gpuSpecResolution } =
-    await resolveGpuSpecForAnalysis(gpuPreset, { ptxText: ptxForGpuSpec });
+    await resolveGpuSpecForAnalysis(gpuPreset, {
+      ptxText: ptxForGpuSpec,
+      enableLocalCudaDetect: true,
+    });
 
   let sassKernel: string | undefined;
   let sassInstr: ReturnType<typeof extractSassFeatures>[1] | undefined;
@@ -138,6 +145,7 @@ export async function analyze(
       pattern,
       bottleneck_heuristic: bottleneck,
       kernel,
+      diagnosis: memory && pattern ? diagnoseKernel(memory, kernel, pattern) : undefined,
       sass_note:
         "SASS-only file: occupancy uses threads=256, shared=0 (Python pipeline normally requires PTX for launch merge).",
     };
@@ -193,6 +201,7 @@ export async function analyze(
       pattern,
       bottleneck_heuristic: bottleneck,
       kernel,
+      diagnosis: memory && pattern ? diagnoseKernel(memory, kernel, pattern) : undefined,
       ptx_kernels_analyzed: kernelNames.length,
       ptx_multi_kernel_note: multi
         ? `PTX instruction features are summed across ${kernelNames.length} .entry kernel(s). Pattern/memory/bottleneck use this aggregate. Occupancy/launch merge still follow the picked kernel (${merged.hints.kernelName ?? "?"}).`

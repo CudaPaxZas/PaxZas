@@ -3,7 +3,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { AMPERE_LIKE_DEFAULT } from "../src/analyzer/gpu_spec";
-import { analyzeOccupancyModel } from "../src/analyzer/occupancy_model";
+import {
+  analyzeOccupancyModel,
+  analyzeKernel,
+  collectWarnings,
+  computeOccupancyBreakdown,
+} from "../src/analyzer/occupancy_model";
 import { mergeLaunchWithHints } from "../src/analyzer/merge_launch";
 import { extractSassFeatures } from "../src/analyzer/sass_features";
 import { PTX_HEAD } from "./helpers/ir_fixtures";
@@ -89,5 +94,154 @@ describe("occupancy_model (Python parity)", () => {
       merged.registerSource
     );
     expect(["low", "medium"]).toContain(out.class);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New tests covering Gaps 7-11
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("occupancy_model — gap fixes", () => {
+  // Ampere SM80 constants (from AMPERE_LIKE_DEFAULT)
+  // smMaxRegisters = 65536, warpSize = 32, regAllocUnitPerWarp = 256
+  // smMaxThreads   = 2048,  smMaxBlocks = 32, smMaxSharedMem = 167936
+
+  // ── Gap 7: Per-warp register allocation accuracy ─────────────────────────
+  //
+  // For values where `roundUp(R * threads, unit) ≠ warps * roundUp(R * 32, unit)`,
+  // the old per-block rounding overstated occupancy.  Concrete case:
+  //   6 regs/thread, 128 threads (4 warps), unit=256:
+  //     OLD: roundUp(6×128=768, 256) = 768 → 65536/768 = 85 blocks
+  //     NEW: 4 × roundUp(6×32=192, 256) = 4×256 = 1024 → 65536/1024 = 64 blocks
+
+  it("per_warp_register_granularity_is_more_conservative", () => {
+    // With 6 regs/thread, 128 threads: per-warp calc gives fewer blocks than
+    // the old per-block calc, demonstrating the fix produces a lower (correct) bound.
+    const bd = computeOccupancyBreakdown(128, 0, 6, AMPERE_LIKE_DEFAULT);
+    // Per-warp: 4 warps × roundUp(192, 256)=256 = 1024 regs/block → 65536/1024 = 64
+    expect(bd.blocks_by_registers).toBe(64);
+    // Must be a valid value (not zero — this config can still launch)
+    expect(bd.blocks_per_sm).toBeGreaterThan(0);
+  });
+
+  it("high_register_config_stays_sane", () => {
+    // 64 regs/thread, 128 threads (4 warps):
+    // regsPerWarp = roundUp(64×32=2048, 256) = 2048; regsPerBlock = 4×2048 = 8192
+    // blocksByRegs = floor(65536/8192) = 8
+    const bd = computeOccupancyBreakdown(128, 0, 64, AMPERE_LIKE_DEFAULT);
+    expect(bd.blocks_by_registers).toBe(8);
+  });
+
+  // ── Gap 8: Launch-failure warning ────────────────────────────────────────
+  //
+  // When blocks_per_sm = 0, the kernel exceeds all SM resource limits and
+  // cannot be launched.  The warning must be a hard error, returned first.
+
+  it("launch_impossible_warning_when_blocks_per_sm_zero", () => {
+    // 256 regs/thread × 256 threads/block → regsPerBlock = 8×roundUp(8192,256)
+    // = 8×8192 = 65536 = entire register file → 1 block fits.  Use 257 regs
+    // to force 0 blocks.
+    // Actually 256 regs/thread × 1 warp (32 threads):
+    // regsPerWarp = roundUp(256*32=8192, 256) = 8192
+    // smMaxRegisters / regsPerWarp = 65536 / 8192 = 8 warps → 8 blocks by regs only
+    // Let's use very high regs on a large block:
+    // 255 regs/thread, 2048 threads (64 warps):
+    // regsPerWarp = roundUp(255*32=8160, 256) = 8192; regsPerBlock = 64*8192 = 524288
+    // 65536 / 524288 < 1 → 0 blocks
+    const bd = computeOccupancyBreakdown(2048, 0, 255, AMPERE_LIKE_DEFAULT);
+    expect(bd.blocks_per_sm).toBe(0);
+
+    const warns = collectWarnings(2048, 0, 255, bd, AMPERE_LIKE_DEFAULT);
+    // Warning must be the ONLY warning (early return) and must contain "cannot launch"
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatch(/cannot launch/i);
+  });
+
+  it("no_launch_failure_warning_for_valid_config", () => {
+    // 32 regs/thread, 128 threads → must have blocks_per_sm > 0
+    const bd = computeOccupancyBreakdown(128, 0, 32, AMPERE_LIKE_DEFAULT);
+    expect(bd.blocks_per_sm).toBeGreaterThan(0);
+    const warns = collectWarnings(128, 0, 32, bd, AMPERE_LIKE_DEFAULT);
+    expect(warns.every(w => !w.match(/cannot launch/i))).toBe(true);
+  });
+
+  // ── Gap 9: occupancy_class field on KernelAnalysis ────────────────────────
+  //
+  // analyzeKernel() must now expose occupancy_class so callers get the
+  // low/medium/high tier without re-implementing the threshold logic.
+
+  it("analyzeKernel_exposes_occupancy_class", () => {
+    // High occupancy config: 32 regs, 256 threads, 0 shared → should be "high"
+    const ka = analyzeKernel(256, 0, 32, AMPERE_LIKE_DEFAULT);
+    expect(["low", "medium", "high"]).toContain(ka.occupancy_class);
+    // Low occupancy config: 160 regs/thread × 256 threads (smMaxWarps=48 on CC8.6):
+    //   regsPerWarp = roundUp(160×32=5120, 256) = 5120
+    //   regsPerBlock = 8×5120 = 40960; blocks = floor(65536/40960) = 1
+    //   activeWarps = 1×8 = 8; occ = 8/48 ≈ 0.17 < 0.3 → "low"
+    const kaLow = analyzeKernel(256, 0, 160, AMPERE_LIKE_DEFAULT);
+    expect(kaLow.occupancy_class).toBe("low");
+  });
+
+  // ── Gap 10: Actionable fix text in warnings ───────────────────────────────
+  //
+  // Register-limiting warning must now include a concrete target register count
+  // and shared-limiting warning must include a concrete byte budget.
+
+  it("register_limiting_warning_contains_target_and_launch_bounds", () => {
+    // 128 regs/thread, 256 threads → registers will limit occupancy
+    const bd = computeOccupancyBreakdown(256, 0, 128, AMPERE_LIKE_DEFAULT);
+    expect(bd.limiting_factor).toBe("registers");
+    const warns = collectWarnings(256, 0, 128, bd, AMPERE_LIKE_DEFAULT);
+    const regWarn = warns.find(w => w.includes("Register pressure"));
+    expect(regWarn).toBeDefined();
+    // Must contain a concrete register target (a number followed by "regs/thread")
+    expect(regWarn).toMatch(/\d+ regs\/thread/);
+    // Must mention __launch_bounds__ as the fix mechanism
+    expect(regWarn).toMatch(/__launch_bounds__/);
+  });
+
+  it("shared_limiting_warning_contains_byte_target", () => {
+    // smMaxSharedMem Ampere = 167936; to force shared_mem as bottleneck,
+    // use enough shared that fitting 2+ blocks is tight.
+    // 167936 / 3 ≈ 55978 bytes → 3 blocks; use > 167936/2 = 83968 to force 1 block
+    const heavyShared = 90000;  // > 83968 → blocks_by_shared = 1
+    const bd = computeOccupancyBreakdown(256, heavyShared, 32, AMPERE_LIKE_DEFAULT);
+    expect(bd.limiting_factor).toBe("shared_mem");
+    const warns = collectWarnings(256, heavyShared, 32, bd, AMPERE_LIKE_DEFAULT);
+    const shmWarn = warns.find(w => w.includes("Shared memory limits"));
+    expect(shmWarn).toBeDefined();
+    // Must contain a concrete byte target
+    expect(shmWarn).toMatch(/\d+ bytes\/block/);
+  });
+
+  // ── Gap 11: estimated_sm_utilization ─────────────────────────────────────
+  //
+  // When smCount is provided, analyzeKernel must surface a human-readable
+  // device utilization string.  Without smCount, must return undefined.
+
+  it("estimated_sm_utilization_present_when_smcount_known", () => {
+    // Build a spec with smCount = 108 (A100)
+    const specWith108 = { ...AMPERE_LIKE_DEFAULT, smCount: 108 };
+    const ka = analyzeKernel(256, 0, 32, specWith108);
+    expect(ka.estimated_sm_utilization).toBeDefined();
+    expect(ka.estimated_sm_utilization).toMatch(/\d+ \/ 108 SMs active/);
+  });
+
+  it("estimated_sm_utilization_undefined_without_smcount", () => {
+    // AMPERE_LIKE_DEFAULT has smCount = undefined
+    const ka = analyzeKernel(256, 0, 32, AMPERE_LIKE_DEFAULT);
+    expect(ka.estimated_sm_utilization).toBeUndefined();
+  });
+
+  it("estimated_sm_utilization_scales_with_occupancy", () => {
+    // Full occupancy (32 regs, 256 threads → occupancy near 1.0):
+    // active SMs ≈ smCount
+    const spec = { ...AMPERE_LIKE_DEFAULT, smCount: 10 };
+    const kaHigh = analyzeKernel(256, 0, 32, spec);
+    const kaLow  = analyzeKernel(2048, 0, 128, spec); // heavy regs → low occupancy
+
+    const highActive = parseInt(kaHigh.estimated_sm_utilization!.split(" ")[0]!);
+    const lowActive  = parseInt(kaLow.estimated_sm_utilization!.split(" ")[0]!);
+    expect(highActive).toBeGreaterThanOrEqual(lowActive);
   });
 });

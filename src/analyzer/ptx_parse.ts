@@ -12,7 +12,7 @@ export interface PtxKernelHints {
 
 const ENTRY_RE = /\.(?:visible\s+)?entry\s+(\S+)\s*\(/g;
 const MAXNREG_RE = /\.maxnreg\s+(\d+)/;
-const MAXNTID_RE = /\.maxntid\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/;
+const MAXNTID_RE = /\.maxntid\s+(\d+)(?:\s*,\s*(\d+)(?:\s*,\s*(\d+))?)?/;
 const SHARED_ARRAY_RE =
   /\.shared(?:\s+\.align\s+\d+)?(?:\s+\.(?:b|s|u|f)(?:8|16|32|64))?\s+\S+\s*\[\s*(\d+)\s*\]/g;
 const DYNAMIC_SHARED_RE =
@@ -114,8 +114,8 @@ export function parsePtxKernelHints(
   if (maxntidM) {
     maxntid = [
       parseInt(maxntidM[1]!, 10),
-      parseInt(maxntidM[2]!, 10),
-      parseInt(maxntidM[3]!, 10),
+      maxntidM[2] !== undefined ? parseInt(maxntidM[2], 10) : 1,
+      maxntidM[3] !== undefined ? parseInt(maxntidM[3], 10) : 1,
     ];
   }
 

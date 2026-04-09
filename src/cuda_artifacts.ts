@@ -4,6 +4,7 @@
  */
 
 import * as vscode from "vscode";
+import * as path from "path";
 
 const EXCLUDE =
   "**/{node_modules,.git,.hg,.svn,out,dist,build/Release,build/Debug}/**";
@@ -29,4 +30,61 @@ export async function findCudaArtifactUris(): Promise<vscode.Uri[]> {
   return [...seen.values()].sort((a, b) =>
     a.fsPath.localeCompare(b.fsPath, undefined, { sensitivity: "base" })
   );
+}
+
+function stripHashSuffix(stem: string): string {
+  return stem.replace(/_[0-9a-f]{8,}$/i, "");
+}
+
+function isSassLikeExt(ext: string): boolean {
+  const e = ext.toLowerCase();
+  return e === ".sass" || e === ".s";
+}
+
+/**
+ * Locate a sidecar SASS file for a PTX file in the same directory.
+ * Priority: exact stem match, then stem with trailing hash removed.
+ */
+export async function findSupplementalSassForPtx(
+  ptxUri: vscode.Uri
+): Promise<vscode.Uri | undefined> {
+  const ptxExt = path.extname(ptxUri.fsPath).toLowerCase();
+  if (ptxExt !== ".ptx") {
+    return undefined;
+  }
+
+  const dir = path.dirname(ptxUri.fsPath);
+  const stem = path.basename(ptxUri.fsPath, path.extname(ptxUri.fsPath));
+  const stemNoHash = stripHashSuffix(stem);
+
+  const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dir));
+  const sassFiles = entries
+    .filter(
+      ([name, type]) =>
+        type === vscode.FileType.File && isSassLikeExt(path.extname(name))
+    )
+    .map(([name]) => ({
+      name,
+      uri: vscode.Uri.file(path.join(dir, name)),
+      stem: path.basename(name, path.extname(name)),
+      ext: path.extname(name).toLowerCase(),
+    }));
+
+  const exact = sassFiles.find((f) => f.stem.toLowerCase() === stem.toLowerCase());
+  if (exact) {
+    return exact.uri;
+  }
+
+  const hashTrimmed = sassFiles.find(
+    (f) => f.stem.toLowerCase() === stemNoHash.toLowerCase()
+  );
+  if (hashTrimmed) {
+    return hashTrimmed.uri;
+  }
+
+  if (sassFiles.length === 1) {
+    return sassFiles[0]!.uri;
+  }
+
+  return undefined;
 }
