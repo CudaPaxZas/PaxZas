@@ -30,6 +30,20 @@
  *    -> Pattern: Data-dependent, complex control flow
  *    -> Challenge: Difficult to optimize generically
  *
+ * Diagnostic signals (computed alongside classification):
+ * Group A/C — Inefficiency signals derived from SASS instruction widths and counts:
+ *   spill_severity            : fraction of instructions that are LDL/STL spill traffic
+ *   store_uncoalesced_risk    : >75% of typed stores are 32-bit (write-side coalescing gap)
+ *   store_vectorization_score : weighted STG width efficiency (0.25 = all 32-bit, 1.0 = all 128-bit)
+ *   tensor_utilization_fraction: tensor_ops / (arithmetic + tensor + 1)
+ *   productive_instruction_fraction: (compute + global I/O) / total_instructions
+ *   shared_reuse_per_barrier  : shared_loads / (barriers + 1) — reuse between sync phases
+ *   warp_divergence_risk      : (branches × loops) / (compute + 1) > 0.01
+ *   fp_to_int_ratio           : (arithmetic_ops - integer_ops) / (integer_ops + 1)
+ *
+ * Groups E-H extend the result with stall-reason inference, warp-primitive
+ * detection, memory-subsystem hazards, and a high-level kernel archetype.
+ *
  * Micro-patterns provide detailed characteristics for deeper analysis.
  */
 
@@ -67,8 +81,12 @@ export interface PatternResult {
   interleaving: string;                       // Load instruction grouping pattern
   /** True when SASS contains LDL/STL ops — register file was exhausted and spilled. */
   spill_risk: boolean;
+  /** 0-1 spill traffic share across all instructions: (LDL+STL)/total_instructions. */
+  spill_severity: number;
   /** True when >75% of typed loads are 32-bit — suggests uncoalesced memory access. */
   uncoalesced_risk: boolean;
+  /** True when >75% of typed stores are 32-bit — write-side coalescing risk. */
+  store_uncoalesced_risk: boolean;
   /** True when kernel is compute-heavy with no tensor ops — HMMA opportunity exists. */
   missing_tensor_cores: boolean;
   /** ATOM/RED > 5% of global mem ops — L2 serialisation risk in histogram/scatter kernels. */
@@ -77,12 +95,24 @@ export interface PatternResult {
   sfu_heavy: boolean;
   /** 0.25–1.0: fraction of max vectorized load width; 1.0 = all LDG.128, 0.25 = all LDG.32. */
   vectorization_score: number;
+  /** 0.25–1.0 write-side typed-width score; 1.0 = all STG.128, 0.25 = all STG.32. */
+  store_vectorization_score: number;
   /** >1.5 barriers per loop iteration — likely syncing redundantly inside the loop body. */
   over_synchronized: boolean;
   /** Heavy scalar FP16 (HFMA/HADD/HMUL) with no HMMA — tensor-core FP16 opportunity. */
   fp16_scalar_risk: boolean;
   /** global_stores ≈ global_loads with low compute — scatter/histogram RMW shape. */
   read_modify_write: boolean;
+  /** Tensor op fraction of compute instructions (0..1). */
+  tensor_utilization_fraction: number;
+  /** Fraction of total instructions that are "useful" compute or global memory work. */
+  productive_instruction_fraction: number;
+  /** Shared-load reuse between synchronization phases. */
+  shared_reuse_per_barrier: number;
+  /** Loop-aware divergence risk: (branches * loops)/(compute + 1) > 0.01. */
+  warp_divergence_risk: boolean;
+  /** FP-vs-int mix: (arithmetic_ops - integer_ops)/(integer_ops + 1). */
+  fp_to_int_ratio: number;
 
   // ── Group E — Stall Reason Inference ──────────────────────────────────────
   /** Consecutive-load chain stall — latency-bound memory access (E1). */
@@ -121,20 +151,29 @@ export interface PatternResult {
  * Algorithm:
  * 1. Extract memory, compute, control, and synchronization metrics from PTX/SASS
  * 2. Calculate derived metrics: intensity ratios, density measures, efficiency scores
- * 3. Build boolean flags for micro-patterns
+ * 3. Build boolean flags for Group A/C micro-pattern signals (spill, coalescing,
+ *    vectorization, tensor utilization, divergence, productive-instruction fraction)
  * 4. Classify into primary pattern based on decision tree:
  *    - High branching -> control_heavy
  *    - Shared + barriers + loops + high compute -> tiled (or reduction if moderate compute)
  *    - No shared/barriers + low compute -> elementwise
  *    - No shared/barriers + high compute -> compute_heavy
  *    - Otherwise -> irregular
- * 5. Boost confidence if SASS data available
+ * 5. Synthesize Groups E-H stall/primitive/hazard/archetype signals
+ * 6. Boost confidence if SASS data available
  *
  * Key metrics:
  * - compute_to_memory = FLOPs / global_mem_ops (threshold ~2-4 distinguishes patterns)
  * - branch_density = branches / compute_ops (threshold ~0.1 for control-heavy)
  * - barrier_density = barriers / compute_ops (threshold ~0.02 for sync-heavy)
  * - work_per_barrier = compute / barriers (efficiency metric: how much work between syncs)
+ * - spill_severity = (local_loads + local_stores) / total_instructions
+ * - store_vectorization_score = weighted STG width / max-width baseline
+ * - tensor_utilization_fraction = tensor_ops / (arithmetic + tensor + 1)
+ * - productive_instruction_fraction = (compute + global I/O) / total_instructions
+ * - shared_reuse_per_barrier = shared_loads / (barriers + 1)
+ * - warp_divergence_risk = (branches * loops) / (compute + 1) > 0.01
+ * - fp_to_int_ratio = (arithmetic_ops - integer_ops) / (integer_ops + 1)
  *
  * @param ptxFeatures High-level PTX instruction counts
  * @param sassFeatures Low-level SASS instruction counts (more accurate, optional)
@@ -257,6 +296,15 @@ export function analyzePattern(
     sassFeatures !== undefined &&
     (sassFeatures.local_loads + sassFeatures.local_stores) > 0;
 
+  const totalInstrCount =
+    sassFeatures !== undefined ? sassFeatures.total_instructions : 0;
+  const localOpsCount =
+    sassFeatures !== undefined
+      ? sassFeatures.local_loads + sassFeatures.local_stores
+      : 0;
+  const spillSeverity =
+    totalInstrCount > 0 ? safeDiv(localOpsCount, totalInstrCount) : 0;
+
   // Uncoalesced access risk (SASS required):
   // When ≥75% of typed (known-width) global loads are narrow 32-bit ops AND
   // there are enough typed loads to be statistically meaningful (> 4), the
@@ -272,6 +320,17 @@ export function analyzePattern(
       ? safeDiv(sassFeatures!.ldg_32, totalLdgTyped)
       : 0;
   const uncoalescedRisk = narrowLoadRatio > 0.75 && sassGlobal > 4;
+
+  const totalStgTyped =
+    sassFeatures !== undefined
+      ? sassFeatures.stg_128 + sassFeatures.stg_64 + sassFeatures.stg_32
+      : 0;
+  const narrowStoreRatio =
+    totalStgTyped > 4
+      ? safeDiv(sassFeatures!.stg_32, totalStgTyped)
+      : 0;
+  const storeUncoalescedRisk =
+    narrowStoreRatio > 0.75 && totalStgTyped > 4 && globalOps > 4;
 
   // Missing tensor-core opportunity:
   // A kernel is flagged when it is compute-heavy (compute_to_memory > 4) and
@@ -355,6 +414,16 @@ export function analyzePattern(
       Math.round(safeDiv(weightedLanes, totalLdgTyped * 4) * 1e6) / 1e6;
   }
 
+  let storeVectorizationScore = 0;
+  if (totalStgTyped >= 4 && sassFeatures !== undefined) {
+    const weightedStoreLanes =
+      sassFeatures.stg_128 * 4 +
+      sassFeatures.stg_64 * 2 +
+      sassFeatures.stg_32 * 1;
+    storeVectorizationScore =
+      Math.round(safeDiv(weightedStoreLanes, totalStgTyped * 4) * 1e6) / 1e6;
+  }
+
   // ── Over-synchronization ─────────────────────────────────────────────────
   //
   // __syncthreads() (BAR.SYNC) is the CUDA mechanism for ensuring all threads
@@ -427,15 +496,7 @@ export function analyzePattern(
   // > 3% means the warp scheduler is regularly blocked waiting for
   // per-thread local-memory reloads at 100–600 cycle latency.
   // Note: occupancy cross-check (< 0.5) is applied in diagnoseKernel().
-  const localOpsCount =
-    sassFeatures !== undefined
-      ? sassFeatures.local_loads + sassFeatures.local_stores
-      : 0;
-  const totalInstrCount =
-    sassFeatures !== undefined ? sassFeatures.total_instructions : 1;
-  const spillSeverityRatio =
-    totalInstrCount > 0 ? safeDiv(localOpsCount, totalInstrCount) : 0;
-  const stallLocalMemory = spillSeverityRatio > 0.03;
+  const stallLocalMemory = spillSeverity > 0.03;
 
   // E4: sync-dominated execution.
   // When most instructions are separated by a barrier with little compute
@@ -457,6 +518,41 @@ export function analyzePattern(
   // kernel) = most likely doing a register-file reduction between tiles.
   const warpReductionPattern =
     warpShuffleOps > 0 && sfuOps === 0 && barriers > 0;
+
+  const globalLoads =
+    sassFeatures !== undefined ? sassFeatures.global_loads : ptxFeatures.global_loads;
+  const globalStores =
+    sassFeatures !== undefined ? sassFeatures.global_stores : ptxFeatures.global_stores;
+
+  const tensorUtilizationFraction =
+    Math.round(safeDiv(sassFeatures?.tensor_ops ?? 0, (sassFeatures?.arithmetic_ops ?? 0) + (sassFeatures?.tensor_ops ?? 0) + 1) * 1e6) / 1e6;
+  const productiveInstructionFraction =
+    totalInstrCount > 0
+      ? Math.round(
+          safeDiv(
+            (sassFeatures?.arithmetic_ops ?? 0) +
+              (sassFeatures?.tensor_ops ?? 0) +
+              globalLoads +
+              globalStores,
+            totalInstrCount
+          ) * 1e6
+        ) / 1e6
+      : 0;
+  const sharedLoadsCount =
+    sassFeatures !== undefined ? sassFeatures.shared_loads : 0;
+  const sharedReusePerBarrier =
+    Math.round(safeDiv(sharedLoadsCount, barriers + 1) * 1e6) / 1e6;
+  const warpDivergenceRisk =
+    safeDiv(branches * loops, computeOps + 1) > 0.01;
+  const fpToIntRatio =
+    sassFeatures !== undefined
+      ? Math.round(
+          safeDiv(
+            sassFeatures.arithmetic_ops - sassFeatures.integer_ops,
+            sassFeatures.integer_ops + 1
+          ) * 1e6
+        ) / 1e6
+      : 0;
 
   //
   // Examples: histogram accumulation, sparse vector scatter, in-place prefix
@@ -480,10 +576,6 @@ export function analyzePattern(
   //   store_to_load_ratio in (0.5, 2.0) — stores and loads are comparable
   //   computeToMemory < 1.0             — very little arithmetic per byte moved
   //   globalOps > 4                     — avoid flagging trivial kernels
-  const globalLoads  =
-    sassFeatures !== undefined ? sassFeatures.global_loads  : ptxFeatures.global_loads;
-  const globalStores =
-    sassFeatures !== undefined ? sassFeatures.global_stores : ptxFeatures.global_stores;
   const storeToLoadRatio = safeDiv(globalStores, globalLoads + 1);
   const readModifyWrite =
     storeToLoadRatio > 0.5 &&
@@ -555,10 +647,6 @@ export function analyzePattern(
   // Evaluated in order; first match wins.  Raw variables already in scope:
   //   pattern, usesTensor, sharedToGlobal (== shared/global ratio), computeToMemory,
   //   sfuOps, barriers, workPerBarrier, readModifyWrite, atomicContentionRisk.
-  const sharedLoadsCount =
-    sassFeatures !== undefined ? sassFeatures.shared_loads : 0;
-  const sharedReusePerBarrier = safeDiv(sharedLoadsCount, barriers + 1);
-
   let archetype: string | undefined;
   // H4: histogram / scatter (most specific: RMW + global atomics)
   if (readModifyWrite && atomicContentionRisk && computeToMemory < 1.0) {
@@ -613,14 +701,22 @@ export function analyzePattern(
     sync_efficiency: syncEfficiency,
     interleaving: interleavingPattern,
     spill_risk: spillRisk,
+    spill_severity: Math.round(spillSeverity * 1e6) / 1e6,
     uncoalesced_risk: uncoalescedRisk,
+    store_uncoalesced_risk: storeUncoalescedRisk,
     missing_tensor_cores: missingTensorCores,
     atomic_contention_risk: atomicContentionRisk,
     sfu_heavy: sfuHeavy,
     vectorization_score: vectorizationScore,
+    store_vectorization_score: storeVectorizationScore,
     over_synchronized: overSynchronized,
     fp16_scalar_risk: fp16ScalarRisk,
     read_modify_write: readModifyWrite,
+    tensor_utilization_fraction: tensorUtilizationFraction,
+    productive_instruction_fraction: productiveInstructionFraction,
+    shared_reuse_per_barrier: sharedReusePerBarrier,
+    warp_divergence_risk: warpDivergenceRisk,
+    fp_to_int_ratio: fpToIntRatio,
     stall_memory_dependency: stallMemoryDependency,
     stall_memory_throttle: stallMemoryThrottle,
     stall_local_memory: stallLocalMemory,

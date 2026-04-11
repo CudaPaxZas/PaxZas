@@ -35,6 +35,8 @@ export interface SassInstructionFeatures {
   shared_loads: number;
   shared_stores: number;
   arithmetic_ops: number;
+  /** Integer ALU/control ops used to separate FP-vs-address compute mix. */
+  integer_ops: number;
   tensor_ops: number;
   barrier: number;
   branch: number;
@@ -135,6 +137,7 @@ function emptySass(): SassInstructionFeatures {
     shared_loads: 0,
     shared_stores: 0,
     arithmetic_ops: 0,
+    integer_ops: 0,
     tensor_ops: 0,
     barrier: 0,
     branch: 0,
@@ -254,6 +257,27 @@ function classifyOpcode(op: string, f: SassInstructionFeatures): void {
     ])
   ) {
     f.arithmetic_ops += 1;
+  }
+
+  if (
+    startsWithAny(opcode, [
+      "IADD",
+      "IMAD",
+      "IMUL",
+      "IMNMX",
+      "ISCADD",
+      "ISET",
+      "ICMP",
+      "IABS",
+      "INEG",
+      "IAND",
+      "IOR",
+      "IXOR",
+      "ISHL",
+      "ISHR",
+    ])
+  ) {
+    f.integer_ops += 1;
   }
 
   if (startsWithAny(opcode, ["MMA", "HMMA", "IMMA", "BMMA", "WGMMA", "WMMA"])) {
@@ -411,6 +435,7 @@ export function sassFeaturesAsDict(
     shared_loads: f.shared_loads,
     shared_stores: f.shared_stores,
     arithmetic_ops: f.arithmetic_ops,
+    integer_ops: f.integer_ops,
     tensor_ops: f.tensor_ops,
     barrier: f.barrier,
     branch: f.branch,

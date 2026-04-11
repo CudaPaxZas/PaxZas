@@ -13,6 +13,11 @@
  * - memory_bound: Low compute/memory ratio; memory bandwidth is the bottleneck
  * - reuse_optimized: Effective use of shared memory for data reuse
  * - balanced: Mixed characteristics without strong imbalance
+ *
+ * Additional Group B signals derived from SASS store widths:
+ * - store_vectorization_score : weighted STG width efficiency (0.25 = all 32-bit, 1.0 = all 128-bit)
+ * - load_store_ratio           : global_loads / (global_stores + 1)
+ * - load_store_balance         : "read_dominated" (>4.0) | "write_dominated" (<0.5) | "balanced"
  */
 
 import type { PtxInstructionFeatures } from "./ptx_features";
@@ -117,6 +122,13 @@ export interface MemoryAnalysis {
   reuse_ratio: number;           // shared_loads / global_loads (cache effectiveness)
   reuse_strength: number;        // shared_loads / global_mem_ops (reuse impact)
   mem_compute_ratio: number;     // bytes_moved / FLOPs (inverse of intensity)
+  /** 0.25–1.0 write-side typed-width efficiency; 1.0 = all STG.128, 0.25 = all STG.32.
+   *  Returns 0 when SASS is unavailable or fewer than 4 typed stores exist. */
+  store_vectorization_score: number;
+  /** global_loads / (global_stores + 1). High ratio = read-heavy; low = write-heavy. */
+  load_store_ratio: number;
+  /** "read_dominated" (ratio > 4.0) | "write_dominated" (ratio < 0.5) | "balanced". */
+  load_store_balance: string;
   
   // Proxy values for compute and memory (used in classification heuristics)
   bytes_proxy: number;           // SASS-derived bytes or PTX estimate
@@ -135,9 +147,15 @@ export interface MemoryAnalysis {
  * Algorithm:
  * 1. Extract memory instruction counts from PTX and SASS (SASS preferred when available)
  * 2. Compute arithmetic intensity = FLOPs / bytes (key performance metric)
+ *    - SASS FLOPs account for tensor-core density (512 FLOPs/HMMA) and SFU ops
+ *    - SASS byte estimate uses typed LDG/STG widths (16/8/4 bytes) for accuracy
  * 3. Measure data reuse via shared memory traffic
  * 4. Classify kernel based on intensity and reuse patterns
- * 5. Calculate confidence score combining data source quality
+ * 5. Compute Group B store-side signals:
+ *    - store_vectorization_score : weighted STG width / max-width baseline (0.25–1.0)
+ *    - load_store_ratio           : global_loads / (global_stores + 1)
+ *    - load_store_balance         : "read_dominated" | "write_dominated" | "balanced"
+ * 6. Calculate confidence score combining data source quality
  *
  * Classification Logic:
  * - compute_friendly: Infinite intensity (no memory ops) or high intensity (>2)
@@ -149,6 +167,8 @@ export interface MemoryAnalysis {
  * - 0.6 base (heuristic estimates always have uncertainty)
  * + 0.25 if SASS available (more accurate than PTX estimates)
  * + 0.1 if high reuse or low intensity (clearer signal)
+ * + 0.1 if streaming cache policy detected (LD.CS)
+ * - 0.1/0.2 penalty if fewer than 5 global ops (insufficient data)
  * Then capped at 0.99 maximum.
  *
  * @param ptxFeatures High-level PTX instruction counts
@@ -242,6 +262,28 @@ export function analyzeMemory(
   
   // mem_compute_ratio = bytes / FLOPs (inverse of intensity)
   const memComputeRatio = safeDiv(bytesMoved, flops);
+  const loadStoreRatio = safeDiv(globalLoads, globalStores + 1);
+
+  let loadStoreBalance = "balanced";
+  if (loadStoreRatio > 4.0) {
+    loadStoreBalance = "read_dominated";
+  } else if (loadStoreRatio < 0.5) {
+    loadStoreBalance = "write_dominated";
+  }
+
+  let storeVectorizationScore = 0;
+  if (sassFeatures !== undefined) {
+    const totalStgTyped =
+      sassFeatures.stg_128 + sassFeatures.stg_64 + sassFeatures.stg_32;
+    if (totalStgTyped >= 4) {
+      const weightedStoreLanes =
+        sassFeatures.stg_128 * 4 +
+        sassFeatures.stg_64 * 2 +
+        sassFeatures.stg_32;
+      storeVectorizationScore =
+        Math.round(safeDiv(weightedStoreLanes, totalStgTyped * 4) * 1e6) / 1e6;
+    }
+  }
 
   // Detect cache policy from SASS cache control bits
   let cachePolicy: string | null = null;
@@ -348,6 +390,9 @@ export function analyzeMemory(
     reuse_ratio: Math.round(reuseRatio * 1e6) / 1e6,
     reuse_strength: Math.round(reuseStrength * 1e6) / 1e6,
     mem_compute_ratio: Math.round(memComputeRatio * 1e6) / 1e6,
+    store_vectorization_score: storeVectorizationScore,
+    load_store_ratio: Math.round(loadStoreRatio * 1e6) / 1e6,
+    load_store_balance: loadStoreBalance,
     bytes_proxy: Math.round(bytesMoved * 1000) / 1000,
     flops_proxy: Math.round(flops * 1000) / 1000,
     ptx_flops_proxy: Math.round(ptxFlops * 1000) / 1000,

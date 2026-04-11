@@ -296,4 +296,60 @@ describe("memory_model — gap fixes", () => {
     const largeOut = analyzeMemory(largePtx);
     expect(smallOut.confidence).toBeLessThan(largeOut.confidence);
   });
+
+  it("store_vectorization_score_reports_typed_store_width", () => {
+    let a = 0x3500;
+    const lines = ["Function : _Z6stVecK", ""];
+    for (let i = 0; i < 4; i++) {
+      lines.push(`${sassHx(a)} STG.E.128 [R${i * 2}], R${i * 2 + 1};`);
+      a += 0x10;
+    }
+    const ptxMod =
+      PTX_HEAD +
+      `\n.visible .entry _Z6stVecK(.param .u64 p) { .reg .f32 %f<4>; ret; }\n`;
+    const ptx = featuresFromPtx(ptxMod, "_Z6stVecK");
+    const sass = featuresFromSass(lines.join("\n"), "_Z6stVecK");
+    const out = analyzeMemory(ptx, sass);
+    expect(out.store_vectorization_score).toBe(1);
+  });
+
+  it("load_store_balance_classifies_read_write_direction", () => {
+    const readHeavyPtx =
+      PTX_HEAD +
+      `
+.visible .entry _Z8readDomK(.param .u64 p) {
+  .reg .f32 %f<4>; .reg .u64 %rd<4>;
+  ld.global.f32 %f0, [%rd1];
+  ld.global.f32 %f1, [%rd1];
+  ld.global.f32 %f2, [%rd1];
+  ld.global.f32 %f3, [%rd1];
+  ld.global.f32 %f0, [%rd1];
+  ld.global.f32 %f1, [%rd1];
+  ld.global.f32 %f2, [%rd1];
+  ld.global.f32 %f3, [%rd1];
+  ld.global.f32 %f0, [%rd1];
+  ld.global.f32 %f1, [%rd1];
+  st.global.f32 [%rd2], %f0;
+  ret;
+}
+`;
+    const writeHeavyPtx =
+      PTX_HEAD +
+      `
+.visible .entry _Z9writeDomK(.param .u64 p) {
+  .reg .f32 %f<4>; .reg .u64 %rd<4>;
+  ld.global.f32 %f0, [%rd1];
+  st.global.f32 [%rd2], %f0;
+  st.global.f32 [%rd2], %f0;
+  st.global.f32 [%rd2], %f0;
+  st.global.f32 [%rd2], %f0;
+  st.global.f32 [%rd2], %f0;
+  ret;
+}
+`;
+    const readOut = analyzeMemory(featuresFromPtx(readHeavyPtx, "_Z8readDomK"));
+    const writeOut = analyzeMemory(featuresFromPtx(writeHeavyPtx, "_Z9writeDomK"));
+    expect(readOut.load_store_balance).toBe("read_dominated");
+    expect(writeOut.load_store_balance).toBe("write_dominated");
+  });
 });

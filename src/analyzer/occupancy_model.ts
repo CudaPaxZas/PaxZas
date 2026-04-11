@@ -403,6 +403,18 @@ export interface KernelAnalysis extends Record<string, unknown> {
   occupancy: number;
   /** Gap 9: "low" | "medium" | "high" classification of occupancy. */
   occupancy_class: string;
+  /**
+   * Minimum regs/thread reduction needed to reach the next occupancy tier.
+   * Only populated when the limiting factor is "registers" and the current
+   * tier is not already "high".  Computed by `findRegisterPressureMargin()`.
+   * Example: 8 means reducing from 64 to 56 regs/thread would improve tier.
+   */
+  register_pressure_margin: number | undefined;
+  /**
+   * The occupancy tier reached after shedding `register_pressure_margin` regs/thread.
+   * Values: "medium" | "high".  Undefined when `register_pressure_margin` is undefined.
+   */
+  next_occupancy_class: string | undefined;
   limiting_factor: LimitName;
   blocks_per_sm: number;
   limits: Record<string, number>;
@@ -415,6 +427,92 @@ export interface KernelAnalysis extends Record<string, unknown> {
    * Example: "54 / 108 SMs active" means 50% of the A100's SMs are busy.
    */
   estimated_sm_utilization: string | undefined;
+}
+
+function occupancyClassRank(cls: string): number {
+  if (cls === "low") {
+    return 0;
+  }
+  if (cls === "medium") {
+    return 1;
+  }
+  return 2;
+}
+
+/**
+ * Finds the minimum register reduction that moves a kernel to a higher occupancy tier.
+ *
+ * When a kernel is register-limited, this function uses a binary search over
+ * `registersPerThread` values to find the lowest register count at which
+ * `classifyOccupancy()` returns a strictly higher tier ("low" → "medium", or
+ * "medium" → "high").
+ *
+ * Algorithm:
+ * 1. Bail out early if the kernel is not register-limited, is already at "high",
+ *    or has only 1 register (cannot reduce further).
+ * 2. Binary search in [1, registersPerThread - 1] for the largest `mid` value
+ *    whose occupancy tier exceeds the current tier.  This maximises `margin`
+ *    (i.e., we want the minimum shed amount, so we want the highest `mid` that
+ *    still improves the tier).
+ * 3. Return `{ margin: registersPerThread - best, nextClass }` so the caller can
+ *    display a concrete target (e.g., "shed 8 regs/thread to reach 'high'").
+ *
+ * Returns `undefined` when no reduction within the [1, rpt-1] range improves
+ * the occupancy tier (e.g., shared memory is the real bottleneck).
+ *
+ * @param threadsPerBlock  Block size in threads
+ * @param sharedMemPerBlock  Per-block shared memory in bytes
+ * @param registersPerThread  Current registers/thread declared by the kernel
+ * @param spec  GPU architecture limits (defaults to Ampere)
+ * @returns `{ margin, nextClass }` or `undefined` when no improvement is reachable
+ */
+export function findRegisterPressureMargin(
+  threadsPerBlock: number,
+  sharedMemPerBlock: number,
+  registersPerThread: number,
+  spec: GpuSpec = AMPERE_LIKE_DEFAULT
+): { margin: number; nextClass: string } | undefined {
+  const current = computeOccupancyBreakdown(
+    threadsPerBlock,
+    sharedMemPerBlock,
+    registersPerThread,
+    spec
+  );
+  const currentClass = classifyOccupancy(current.occupancy);
+  const currentRank = occupancyClassRank(currentClass);
+
+  if (current.limiting_factor !== "registers" || currentRank >= 2 || registersPerThread <= 1) {
+    return undefined;
+  }
+
+  let lo = 1;
+  let hi = registersPerThread - 1;
+  let best: number | undefined;
+  let bestClass: string | undefined;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const trial = computeOccupancyBreakdown(
+      threadsPerBlock,
+      sharedMemPerBlock,
+      mid,
+      spec
+    );
+    const trialClass = classifyOccupancy(trial.occupancy);
+    const improved = occupancyClassRank(trialClass) > currentRank;
+    if (improved) {
+      best = mid;
+      bestClass = trialClass;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  if (best === undefined || bestClass === undefined) {
+    return undefined;
+  }
+  return { margin: registersPerThread - best, nextClass: bestClass };
 }
 
 export function analyzeKernel(
@@ -475,6 +573,12 @@ export function analyzeKernel(
     bd.blocks_per_sm * sharedPerBlockAlloc,
     g.smMaxSharedMem
   );
+  const registerMargin = findRegisterPressureMargin(
+    threadsPerBlock,
+    sharedMemPerBlock,
+    registersPerThread,
+    spec
+  );
 
   return {
     gpu: g.name,
@@ -487,6 +591,8 @@ export function analyzeKernel(
     // Gap 9: expose occupancy tier so callers don’t have to re-implement the
     // low/medium/high bucketing themselves.
     occupancy_class: classifyOccupancy(warpOccupancy),
+    register_pressure_margin: registerMargin?.margin,
+    next_occupancy_class: registerMargin?.nextClass,
     limiting_factor: bd.limiting_factor,
     blocks_per_sm: bd.blocks_per_sm,
     limits: {
