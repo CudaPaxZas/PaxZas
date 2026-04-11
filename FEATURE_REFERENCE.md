@@ -428,8 +428,6 @@ traffic; `"ptx"` otherwise.  SASS presence adds `+0.1` to confidence.
 
 ### Step 4 — Micro-pattern boolean flags
 
-All flags appear both at the top level of `PatternResult` and inside `pattern_micro`.
-
 | Flag | Condition |
 |------|-----------|
 | `high_looping` | `loopDensity > 0.05` |

@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { diagnoseKernel } from "../src/analyzer/diagnose";
 import { analyzeKernel } from "../src/analyzer/occupancy_model";
 import type { MemoryAnalysis } from "../src/analyzer/memory_model";
-import type { PatternResult, PatternMicro } from "../src/analyzer/pattern_model";
+import type { PatternResult } from "../src/analyzer/pattern_model";
 
 // ── Stub helpers ──────────────────────────────────────────────────────────────
 
@@ -33,9 +33,23 @@ function memStub(cls: string): MemoryAnalysis {
   } as unknown as MemoryAnalysis;
 }
 
-/** Minimal PatternMicro required by the PatternResult interface. */
-function microStub(): PatternMicro {
-  return {
+/** Clean PatternResult with every boolean false and metrics zeroed. */
+function patStub(overrides: Partial<PatternResult> = {}): PatternResult {
+  const base: PatternResult = {
+    class: "elementwise",
+    confidence: 1,
+    shared_ops: 0,
+    global_ops: 4,
+    barriers: 0,
+    branches: 0,
+    loops: 0,
+    shared_to_global_ratio: 0,
+    branch_density: 0,
+    branch_per_global_mem_op: 0,
+    barrier_density: 0,
+    work_per_barrier: 0,
+    compute_to_memory_ratio: 2,
+    uses_tensor_cores: false,
     high_looping: false,
     sync_heavy: false,
     control_irregular: false,
@@ -61,47 +75,7 @@ function microStub(): PatternMicro {
     uses_warp_shuffle: false,
     uses_warp_vote: false,
     warp_reduction_pattern: false,
-  };
-}
-
-/** Clean PatternResult with every boolean false and metrics zeroed. */
-function patStub(overrides: Partial<PatternResult> = {}): PatternResult {
-  const base: PatternResult = {
-    class: "elementwise",
-    confidence: 1,
-    shared_ops: 0,
-    global_ops: 4,
-    barriers: 0,
-    branches: 0,
-    loops: 0,
-    shared_to_global_ratio: 0,
-    branch_density: 0,
-    branch_per_global_mem_op: 0,
-    barrier_density: 0,
-    work_per_barrier: 0,
-    compute_to_memory_ratio: 2,
-    uses_tensor_cores: false,
-    streaming: false,
-    sync_efficiency: "none",
-    interleaving: "none",
-    spill_risk: false,
-    uncoalesced_risk: false,
-    missing_tensor_cores: false,
-    atomic_contention_risk: false,
-    sfu_heavy: false,
-    vectorization_score: 1,
-    over_synchronized: false,
-    fp16_scalar_risk: false,
-    read_modify_write: false,
-    stall_memory_dependency: false,
-    stall_memory_throttle: false,
-    stall_local_memory: false,
-    stall_sync: false,
-    uses_warp_shuffle: false,
-    uses_warp_vote: false,
-    warp_reduction_pattern: false,
     archetype: undefined,
-    pattern_micro: microStub(),
     source: "ptx",
     insight: "",
   };

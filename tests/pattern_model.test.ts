@@ -274,7 +274,7 @@ describe("pattern_model (Python parity)", () => {
     const ptx = featuresFromPtx(ptxMod, "_Z4str");
     const out = analyzePattern(ptx);
     expect(out.streaming).toBe(true);
-    expect(out.pattern_micro.streaming).toBe(true);
+    expect(out.streaming).toBe(true);
     expect(out.sync_efficiency).toBe("inefficient");
     expect(out.interleaving).toBe("mixed");
   });
@@ -370,7 +370,7 @@ describe("pattern_model (Python parity)", () => {
     const sassI = interleaved.join("\n");
     const outInterleaved = analyzePattern(ptx, featuresFromSass(sassI, "_Z3ilv"));
     expect(outInterleaved.interleaving).toBe("interleaved");
-    expect(outInterleaved.pattern_micro.interleaving).toBe("interleaved");
+    expect(outInterleaved.interleaving).toBe("interleaved");
     expect(featuresFromSass(sassI, "_Z3ilv").instruction_sequence.length).toBeGreaterThanOrEqual(
       4
     );
@@ -395,7 +395,7 @@ describe("pattern_model (Python parity)", () => {
     );
     const outStacked = analyzePattern(ptx2, featuresFromSass(sassS, "_Z3stk"));
     expect(outStacked.interleaving).toBe("stacked");
-    expect(outStacked.pattern_micro.interleaving).toBe("stacked");
+    expect(outStacked.interleaving).toBe("stacked");
   });
 
   it("micro_high_looping_and_sync_heavy", () => {
@@ -422,8 +422,8 @@ describe("pattern_model (Python parity)", () => {
     }
     const sass = featuresFromSass(mlns.join("\n"), "_Z8k_2loops");
     const out = analyzePattern(ptx, sass);
-    expect(out.pattern_micro.high_looping).toBe(true);
-    expect(out.pattern_micro.sync_heavy).toBe(true);
+    expect(out.high_looping).toBe(true);
+    expect(out.sync_heavy).toBe(true);
   });
 
   it("micro_control_irregular_and_control_dominated", () => {
@@ -452,8 +452,8 @@ describe("pattern_model (Python parity)", () => {
     }
     const sass = featuresFromSass(mic.join("\n"), "_Z3mic");
     const out = analyzePattern(ptx, sass);
-    expect(out.pattern_micro.control_irregular).toBe(true);
-    expect(out.pattern_micro.control_dominated).toBe(true);
+    expect(out.control_irregular).toBe(true);
+    expect(out.control_dominated).toBe(true);
   });
 
   it("micro_complex_kernel_and_tensor_dominated", () => {
@@ -482,8 +482,8 @@ describe("pattern_model (Python parity)", () => {
     }
     const sass = featuresFromSass(cpx.join("\n"), "_Z5k_loop");
     const out = analyzePattern(ptx, sass);
-    expect(out.pattern_micro.complex_kernel).toBe(true);
-    expect(out.pattern_micro.tensor_dominated).toBe(true);
+    expect(out.complex_kernel).toBe(true);
+    expect(out.tensor_dominated).toBe(true);
   });
 });
 
@@ -491,8 +491,7 @@ describe("pattern_model — inefficiency signals", () => {
   // ── spill_risk ──────────────────────────────────────────────────────────────
 
   it("spill_risk_true_when_ldl_stl_present", () => {
-    // LDL/STL in SASS proves register-file spilling; spill_risk must be true
-    // on both the top-level result and inside pattern_micro.
+    // LDL/STL in SASS proves register-file spilling; spill_risk must be true.
     const ptxMod =
       PTX_HEAD +
       `
@@ -513,7 +512,7 @@ describe("pattern_model — inefficiency signals", () => {
     const sass = featuresFromSass(lines.join("\n"), "_Z6spillK");
     const out  = analyzePattern(ptx, sass);
     expect(out.spill_risk).toBe(true);
-    expect(out.pattern_micro.spill_risk).toBe(true);
+    expect(out.spill_risk).toBe(true);
   });
 
   it("spill_risk_false_when_no_ldl_stl", () => {
@@ -567,7 +566,7 @@ describe("pattern_model — inefficiency signals", () => {
     const sass = featuresFromSass(lines.join("\n"), "_Z7uncoalK");
     const out  = analyzePattern(ptx, sass);
     expect(out.uncoalesced_risk).toBe(true);
-    expect(out.pattern_micro.uncoalesced_risk).toBe(true);
+    expect(out.uncoalesced_risk).toBe(true);
   });
 
   it("uncoalesced_risk_false_when_wide_loads_dominate", () => {
@@ -621,7 +620,7 @@ describe("pattern_model — inefficiency signals", () => {
     const out  = analyzePattern(ptx, sass);
     expect(out.uses_tensor_cores).toBe(false);
     expect(out.missing_tensor_cores).toBe(true);
-    expect(out.pattern_micro.missing_tensor_cores).toBe(true);
+    expect(out.missing_tensor_cores).toBe(true);
   });
 
   it("missing_tensor_cores_false_when_hmma_present", () => {
@@ -640,7 +639,7 @@ describe("pattern_model — inefficiency signals", () => {
     const out  = analyzePattern(ptx, sass);
     expect(out.uses_tensor_cores).toBe(true);
     expect(out.missing_tensor_cores).toBe(false);
-    expect(out.pattern_micro.missing_tensor_cores).toBe(false);
+    expect(out.missing_tensor_cores).toBe(false);
   });
 
   it("missing_tensor_cores_false_for_memory_bound_kernel", () => {
@@ -701,7 +700,7 @@ describe("pattern_model — inefficiency signals v2", () => {
     const sass = featuresFromSass(lines.join("\n"), "_Z5atomCK");
     const out  = analyzePattern(ptx, sass);
     expect(out.atomic_contention_risk).toBe(true);
-    expect(out.pattern_micro.atomic_contention_risk).toBe(true);
+    expect(out.atomic_contention_risk).toBe(true);
   });
 
   it("atomic_contention_risk_false_when_no_atomics", () => {
@@ -764,7 +763,7 @@ describe("pattern_model — inefficiency signals v2", () => {
     const sass = featuresFromSass(lines.join("\n"), "_Z4sfuHK");
     const out  = analyzePattern(ptx, sass);
     expect(out.sfu_heavy).toBe(true);
-    expect(out.pattern_micro.sfu_heavy).toBe(true);
+    expect(out.sfu_heavy).toBe(true);
   });
 
   it("sfu_heavy_false_when_no_mufu", () => {
@@ -800,7 +799,7 @@ describe("pattern_model — inefficiency signals v2", () => {
     const sass = featuresFromSass(lines.join("\n"), "_Z4vec1K");
     const out  = analyzePattern(ptx, sass);
     expect(out.vectorization_score).toBeCloseTo(1.0, 5);
-    expect(out.pattern_micro.vectorization_score).toBeCloseTo(1.0, 5);
+    expect(out.vectorization_score).toBeCloseTo(1.0, 5);
   });
 
   it("vectorization_score_025_when_all_ldg32", () => {
@@ -876,7 +875,7 @@ $L_loop:
     const sass = featuresFromSass(lines.join("\n"), "_Z4ovrSK");
     const out  = analyzePattern(ptx, sass);
     expect(out.over_synchronized).toBe(true);
-    expect(out.pattern_micro.over_synchronized).toBe(true);
+    expect(out.over_synchronized).toBe(true);
   });
 
   it("over_synchronized_false_when_barrier_ratio_low", () => {
@@ -971,7 +970,7 @@ $L_b:
     const sass = featuresFromSass(lines.join("\n"), "_Z5fp16RK");
     const out  = analyzePattern(ptx, sass);
     expect(out.fp16_scalar_risk).toBe(true);
-    expect(out.pattern_micro.fp16_scalar_risk).toBe(true);
+    expect(out.fp16_scalar_risk).toBe(true);
   });
 
   it("fp16_scalar_risk_false_when_hmma_present", () => {
@@ -1016,7 +1015,7 @@ $L_b:
     const sass = featuresFromSass(lines.join("\n"), "_Z3rmwK");
     const out  = analyzePattern(ptx, sass);
     expect(out.read_modify_write).toBe(true);
-    expect(out.pattern_micro.read_modify_write).toBe(true);
+    expect(out.read_modify_write).toBe(true);
   });
 
   it("read_modify_write_false_when_compute_heavy", () => {
@@ -1084,7 +1083,7 @@ describe("pattern_model — stall inference, warp primitives, archetypes", () =>
     const sass = featuresFromSass(lines.join("\n"), "_Z6ldChainK");
     const out  = analyzePattern(ptx, sass);
     expect(out.stall_memory_dependency).toBe(true);
-    expect(out.pattern_micro.stall_memory_dependency).toBe(true);
+    expect(out.stall_memory_dependency).toBe(true);
   });
 
   it("stall_memory_dependency_false_when_loads_interleaved", () => {
@@ -1146,7 +1145,7 @@ describe("pattern_model — stall inference, warp primitives, archetypes", () =>
     const sass = featuresFromSass(lines.join("\n"), "_Z6spillHK");
     const out  = analyzePattern(ptx, sass);
     expect(out.stall_local_memory).toBe(true);
-    expect(out.pattern_micro.stall_local_memory).toBe(true);
+    expect(out.stall_local_memory).toBe(true);
   });
 
   it("stall_local_memory_false_when_no_spill", () => {
@@ -1183,7 +1182,7 @@ describe("pattern_model — stall inference, warp primitives, archetypes", () =>
     const sass = featuresFromSass(lines.join("\n"), "_Z7syncHeavK");
     const out  = analyzePattern(ptx, sass);
     expect(out.stall_sync).toBe(true);
-    expect(out.pattern_micro.stall_sync).toBe(true);
+    expect(out.stall_sync).toBe(true);
   });
 
   it("stall_sync_false_when_work_per_barrier_is_high", () => {
@@ -1219,7 +1218,7 @@ describe("pattern_model — stall inference, warp primitives, archetypes", () =>
     const sass = featuresFromSass(lines.join("\n"), "_Z6wShflK");
     const out  = analyzePattern(ptx, sass);
     expect(out.uses_warp_shuffle).toBe(true);
-    expect(out.pattern_micro.uses_warp_shuffle).toBe(true);
+    expect(out.uses_warp_shuffle).toBe(true);
   });
 
   it("uses_warp_shuffle_false_when_no_shfl", () => {
@@ -1245,7 +1244,7 @@ describe("pattern_model — stall inference, warp primitives, archetypes", () =>
     const sass = featuresFromSass(lines.join("\n"), "_Z6wVoteK");
     const out  = analyzePattern(ptx, sass);
     expect(out.uses_warp_vote).toBe(true);
-    expect(out.pattern_micro.uses_warp_vote).toBe(true);
+    expect(out.uses_warp_vote).toBe(true);
   });
 
   // ── F4: warp_reduction_pattern ────────────────────────────────────────────
@@ -1264,7 +1263,7 @@ describe("pattern_model — stall inference, warp primitives, archetypes", () =>
     const sass = featuresFromSass(lines.join("\n"), "_Z6wRedK");
     const out  = analyzePattern(ptx, sass);
     expect(out.warp_reduction_pattern).toBe(true);
-    expect(out.pattern_micro.warp_reduction_pattern).toBe(true);
+    expect(out.warp_reduction_pattern).toBe(true);
   });
 
   it("warp_reduction_pattern_false_when_sfu_present", () => {

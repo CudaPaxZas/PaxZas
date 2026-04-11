@@ -38,105 +38,6 @@ import type { SassInstructionFeatures } from "./sass_features";
 import { safeDiv } from "./opcode_kinds";
 
 /**
- * Fine-grained pattern characteristics for detailed kernel analysis.
- * Boolean flags indicate presence of specific micro-behaviors.
- */
-export interface PatternMicro {
-  high_looping: boolean;        // Loops present and frequent (density > 0.05)
-  sync_heavy: boolean;          // Barriers present and frequent (density > 0.02)
-  control_irregular: boolean;   // High branch + memory intensity (>0.15)
-  control_dominated: boolean;   // Compute to branches ratio < 5.0 (control has weight)
-  complex_kernel: boolean;      // 2+ of: loops, barriers, high branching
-  tensor_dominated: boolean;    // Uses tensor cores with high compute/memory ratio
-  streaming: boolean;           // No shared/sync/loops + low compute/memory ratio
-  sync_efficiency: string;      // "efficient" / "moderate" / "inefficient"
-  interleaving: string;         // "interleaved" / "stacked" / "mixed"
-  /** LDL/STL instructions detected in SASS — compiler spilled registers to local memory. */
-  spill_risk: boolean;
-  /** >75% of typed global loads are 32-bit — likely non-coalesced warp access pattern. */
-  uncoalesced_risk: boolean;
-  /** Compute-heavy kernel with no MMA/HMMA — FFMA could be replaced by tensor cores. */
-  missing_tensor_cores: boolean;
-  /**
-   * ATOM / RED instructions > 5% of global memory ops — L2 atomic contention risk.
-   * Indicates scatter/histogram kernels that serialize at the memory controller.
-   */
-  atomic_contention_risk: boolean;
-  /**
-   * MUFU (Special Function Unit) ops > 15% of total arithmetic — SFU throughput risk.
-   * SFU has ¼ the throughput of CUDA cores; heavy transcendental use (sin, exp, log)
-   * may stall warps waiting for SFU results even when memory bandwidth is idle.
-   */
-  sfu_heavy: boolean;
-  /**
-   * Weighted average load width: 1.0 = all 128-bit (fully vectorized), 0.25 = all 32-bit.
-   * Computed as (ldg_128*4 + ldg_64*2 + ldg_32*1) / (total_typed * 4).
-   * Requires ≥ 4 typed loads; returns 0 when SASS is unavailable.
-   */
-  vectorization_score: number;
-  /**
-   * True when there are >1.5 barriers per loop iteration — likely syncing inside
-   * a loop body when a single sync per phase would suffice. Over-synchronization
-   * stalls every warp in the block at every iteration boundary.
-   */
-  over_synchronized: boolean;
-  /**
-   * Heavy scalar FP16 arithmetic (HFMA/HADD/HMUL) with no HMMA tensor ops.
-   * On SM ≥ 7.0 the same FP16 matrix work in tensor-core form (WMMA API) runs
-   * 16–32× faster. Distinct from missing_tensor_cores which targets FP32 FFMA.
-   */
-  fp16_scalar_risk: boolean;
-  /**
-   * Pattern: global_stores ≈ global_loads with low compute — read-modify-write /
-   * scatter / histogram shape. Each warp reads, modifies, and writes back
-   * independently, preventing coalescing and suggesting privatization.
-   */
-  read_modify_write: boolean;
-
-  // ── Group E — Stall Reason Inference ──────────────────────────────────────
-  /**
-   * stream_max_consecutive_loads > 4 AND stream_interleave_score < 0.2.
-   * Threads are likely stalled waiting for each load to resolve before the
-   * next load is issued — a latency-bound memory pattern (pointer chasing).
-   * SASS required; false when unavailable.
-   */
-  stall_memory_dependency: boolean;
-  /**
-   * global_mem_ops > 16 AND stream_interleave_score > 0.4 AND computeToMemory < 2.
-   * Loads and compute are interleaved but there is more memory work than
-   * arithmetic — the L2/DRAM pipeline is full (bandwidth bound, not latency).
-   * SASS required; false when unavailable.
-   */
-  stall_memory_throttle: boolean;
-  /**
-   * spill_severity (local_ops / total_instructions) > 3%.
-   * Register eviction to per-thread local memory dominates instruction mix;
-   * even moderate occupancy cannot hide 100–600 cycle reload latency.
-   * SASS required; false when unavailable.
-   * Note: upgraded in diagnoseKernel() to also require occupancy < 0.5.
-   */
-  stall_local_memory: boolean;
-  /**
-   * barriers >= 2 AND work_per_barrier < 30 AND shared memory present.
-   * Most execution time is spent at __syncthreads() rather than doing compute;
-   * not necessarily over-synchronized but definitely sync-dominated.
-   */
-  stall_sync: boolean;
-
-  // ── Group F — Warp-Level Primitives ────────────────────────────────────────
-  /** SHFL / SHFL.BFLY / SHFL.UP / SHFL.DOWN / SHFL.IDX detected. */
-  uses_warp_shuffle: boolean;
-  /** VOTE.ALL / VOTE.ANY / VOTE.EQ / MATCH.ANY / MATCH.ALL detected. */
-  uses_warp_vote: boolean;
-  /**
-   * SHFL present AND barriers > 0 AND no SFU ops — inferred warp-shuffle–based
-   * cooperative reduction. Positive quality signal: shuffle is 2–4× faster
-   * than the LDS + BAR equivalent.
-   */
-  warp_reduction_pattern: boolean;
-}
-
-/**
  * Complete pattern analysis result for a kernel.
  * Combines pattern classification with detailed metrics and confidence.
  */
@@ -155,6 +56,12 @@ export interface PatternResult {
   work_per_barrier: number;                   // compute / barriers (sync efficiency)
   compute_to_memory_ratio: number;            // FLOPs / memory_ops (key determinant)
   uses_tensor_cores: boolean;                 // SASS tensor op count > 0
+  high_looping: boolean;                      // Loop density > 0.05
+  sync_heavy: boolean;                        // Barrier density > 0.02
+  control_irregular: boolean;                 // Branch + memory intensity > 0.15
+  control_dominated: boolean;                 // Compute-to-branches ratio < 5.0
+  complex_kernel: boolean;                    // 2+ of: loops, barriers, high branching
+  tensor_dominated: boolean;                  // Uses tensor cores with high compute/memory ratio
   streaming: boolean;                         // Streaming memory access pattern
   sync_efficiency: string;                    // Quality of synchronization usage
   interleaving: string;                       // Load instruction grouping pattern
@@ -204,7 +111,6 @@ export interface PatternResult {
    */
   archetype: string | undefined;
 
-  pattern_micro: PatternMicro;                // Fine-grained characteristics
   source: string;                             // "sass" if SASS used, else "ptx"
   insight: string;                            // Human-readable explanation
 }
@@ -584,34 +490,6 @@ export function analyzePattern(
     storeToLoadRatio < 2.0 &&
     computeToMemory < 1.0 &&
     globalOps > 4;
-  const patternMicro: PatternMicro = {
-    high_looping: highLooping,
-    sync_heavy: syncHeavy,
-    control_irregular: controlIrregular,
-    control_dominated: controlDominated,
-    complex_kernel: complexKernel,
-    tensor_dominated: tensorDominated,
-    streaming: isStreaming,
-    sync_efficiency: syncEfficiency,
-    interleaving: interleavingPattern,
-    spill_risk: spillRisk,
-    uncoalesced_risk: uncoalescedRisk,
-    missing_tensor_cores: missingTensorCores,
-    atomic_contention_risk: atomicContentionRisk,
-    sfu_heavy: sfuHeavy,
-    vectorization_score: vectorizationScore,
-    over_synchronized: overSynchronized,
-    fp16_scalar_risk: fp16ScalarRisk,
-    read_modify_write: readModifyWrite,
-    stall_memory_dependency: stallMemoryDependency,
-    stall_memory_throttle: stallMemoryThrottle,
-    stall_local_memory: stallLocalMemory,
-    stall_sync: stallSync,
-    uses_warp_shuffle: usesWarpShuffle,
-    uses_warp_vote: usesWarpVote,
-    warp_reduction_pattern: warpReductionPattern,
-  };
-
   // Pattern classification decision tree
   let pattern: string;
   let confidence: number;
@@ -751,7 +629,12 @@ export function analyzePattern(
     uses_warp_vote: usesWarpVote,
     warp_reduction_pattern: warpReductionPattern,
     archetype,
-    pattern_micro: patternMicro,
+    high_looping: highLooping,
+    sync_heavy: syncHeavy,
+    control_irregular: controlIrregular,
+    control_dominated: controlDominated,
+    complex_kernel: complexKernel,
+    tensor_dominated: tensorDominated,
     source: sassFeatures !== undefined ? "sass" : "ptx",
     insight,
   };
