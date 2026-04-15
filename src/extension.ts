@@ -4,6 +4,11 @@ import {
   findCudaArtifactUris,
   findSupplementalSassForPtx,
 } from "./cuda_artifacts";
+import { resolveGpuSpecForAnalysis } from "./analyzer/gpu_spec";
+import { mergeLaunchWithHints } from "./analyzer/merge_launch";
+import { extractSassFeatures } from "./analyzer/sass_features";
+import { sweepBlockSizes, buildSignals, type KernelInsights } from "./analyzer/occupancy_sweep";
+import { showOccupancySweepPanel } from "./webview/occupancyPanel";
 
 const OUTPUT_CHANNEL_ID = "cudaAnalyzer";
 
@@ -273,6 +278,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
+      "paxzas.occupancySweep",
+      async (uri?: vscode.Uri) => {
+        await runOccupancySweepCommand(context, uri);
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
       "paxzas.analyzeWithLaunchSpec",
       async (uri?: vscode.Uri) => {
         const spec = await vscode.window.showInputBox({
@@ -323,6 +337,108 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
     )
+  );
+}
+
+async function runOccupancySweepCommand(
+  context: vscode.ExtensionContext,
+  uri?: vscode.Uri
+): Promise<void> {
+  let text: string;
+  let sourceUri: vscode.Uri | undefined;
+
+  if (uri) {
+    text = await readFileText(uri);
+    sourceUri = uri;
+  } else {
+    const editor = vscode.window.activeTextEditor;
+    if (editor && isSupportedDocument(editor.document)) {
+      text = await textFromDocument(editor.document);
+      sourceUri = editor.document.uri;
+    } else {
+      const uris = await findCudaArtifactUris();
+      if (uris.length === 0) {
+        void vscode.window.showWarningMessage("No .ptx or .sass files found.");
+        return;
+      }
+      if (uris.length === 1) {
+        sourceUri = uris[0];
+      } else {
+        const items = uris.map((u) => ({
+          label: vscode.workspace.asRelativePath(u, false),
+          description: u.fsPath,
+          uri: u,
+        }));
+        const sel = await vscode.window.showQuickPick(items, {
+          placeHolder: "Select PTX/SASS file for occupancy sweep",
+          matchOnDescription: true,
+        });
+        sourceUri = sel?.uri;
+      }
+      if (!sourceUri) return;
+      text = await readFileText(sourceUri);
+    }
+  }
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Occupancy Sweep", cancellable: false },
+    async () => {
+      await new Promise<void>((r) => setImmediate(r));
+
+      const gpuPreset = gpuPresetFromSettings();
+      const { spec } = await resolveGpuSpecForAnalysis(gpuPreset, {
+        ptxText: text,
+        enableLocalCudaDetect: true,
+      });
+
+      let registers = 32;
+      let shared = 0;
+      let currentBlockSize: number | undefined;
+
+      const sassText = await supplementalSassForPtx(sourceUri);
+      let sassRegisters: number | undefined;
+      if (sassText) {
+        const [, sassInstr] = extractSassFeatures(sassText, undefined);
+        if (sassInstr.max_register_index >= 0) {
+          sassRegisters = sassInstr.max_register_index + 1;
+        }
+      }
+
+      try {
+        const merged = mergeLaunchWithHints(text, undefined, {}, sassRegisters ?? null);
+        registers = merged.registers;
+        shared = merged.shared;
+        currentBlockSize = merged.threads;
+      } catch {
+        if (sassRegisters != null) registers = sassRegisters;
+      }
+
+      let insights: KernelInsights | undefined;
+      try {
+        const report = await analyze(text, {}, undefined, sassText, gpuPreset);
+        if (!report.error && report.memory && report.pattern) {
+          const signals = buildSignals(report.pattern, report.memory);
+          insights = {
+            memoryClass: report.memory.class,
+            memoryInsight: report.memory.insight,
+            arithmeticIntensity: report.memory.arithmetic_intensity_ops_per_byte,
+            patternClass: report.pattern.class,
+            patternInsight: report.pattern.insight,
+            archetype: report.pattern.archetype,
+            primaryBottleneck: report.diagnosis?.primary_bottleneck ?? "none",
+            secondaryBottlenecks: report.diagnosis?.secondary_bottlenecks ?? [],
+            suggestions: report.diagnosis?.optimization_priority?.slice(0, 3) ?? [],
+            signals,
+            diagnosisConfidence: report.diagnosis?.confidence ?? 0,
+          };
+        }
+      } catch {
+        // Analysis failed; sweep still works without insights
+      }
+
+      const sweep = sweepBlockSizes(shared, registers, spec, currentBlockSize, insights);
+      showOccupancySweepPanel(context.extensionUri, sweep);
+    }
   );
 }
 

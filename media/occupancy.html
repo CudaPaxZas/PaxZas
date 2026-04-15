@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'nonce-{{NONCE}}'; style-src 'nonce-{{NONCE}}';" />
+  <title>Occupancy Sweep</title>
+  <style nonce="{{NONCE}}">
+    :root {
+      --fg: var(--vscode-foreground, #ccc);
+      --bg: var(--vscode-editor-background, #1e1e1e);
+      --border: var(--vscode-panel-border, #444);
+      --muted: var(--vscode-descriptionForeground, #888);
+      --card-bg: var(--vscode-sideBar-background, #252526);
+      --accent: var(--vscode-charts-blue, #4fc1ff);
+      --green: var(--vscode-charts-green, #89d185);
+      --orange: var(--vscode-charts-orange, #e8ab53);
+      --red: var(--vscode-charts-red, #f14c4c);
+      --purple: var(--vscode-charts-purple, #b180d7);
+      --yellow: var(--vscode-charts-yellow, #cca700);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: var(--vscode-font-family, system-ui, sans-serif);
+      font-size: 13px;
+      padding: 16px 24px 32px;
+    }
+    h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+    .subtitle { color: var(--muted); margin-bottom: 16px; }
+
+    /* ── Top layout: info + insights side by side ── */
+    .top-row {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 16px;
+      margin-bottom: 20px;
+      align-items: start;
+    }
+    @media (max-width: 700px) {
+      .top-row { grid-template-columns: 1fr; }
+    }
+
+    /* Info cards grid */
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 8px;
+    }
+    .info-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px 12px;
+    }
+    .info-card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    .info-card .value { font-size: 15px; font-weight: 600; margin-top: 2px; }
+
+    /* ── Insights panel ── */
+    .insights-panel {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 12px 14px;
+      font-size: 12px;
+    }
+    .insights-panel h3 {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .bottleneck-tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-weight: 600;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .bottleneck-tag.primary { background: rgba(241,76,76,0.2); color: var(--red); }
+    .bottleneck-tag.secondary { background: rgba(232,171,83,0.15); color: var(--orange); font-weight: 400; }
+    .bottleneck-tag.none { background: rgba(137,209,133,0.15); color: var(--green); }
+    .suggestion-list { list-style: none; padding: 0; margin: 8px 0 0; }
+    .suggestion-list li {
+      padding: 3px 0;
+      border-top: 1px solid var(--border);
+      color: var(--fg);
+    }
+    .suggestion-list li::before { content: "\2192\00a0"; color: var(--muted); }
+    .insights-section { margin-top: 10px; }
+    .insights-section .section-label { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+
+    /* ── Signal badges ── */
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 20px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .badge.error { background: rgba(241,76,76,0.15); color: var(--red); border: 1px solid rgba(241,76,76,0.3); }
+    .badge.warn  { background: rgba(232,171,83,0.12); color: var(--orange); border: 1px solid rgba(232,171,83,0.25); }
+    .badge.info  { background: rgba(79,193,255,0.1);  color: var(--accent); border: 1px solid rgba(79,193,255,0.2); }
+
+    /* ── Charts ── */
+    .chart-section { margin-bottom: 28px; }
+    .chart-section h2 {
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 4px;
+    }
+    .chart-wrap { position: relative; width: 100%; max-width: 900px; height: 320px; }
+    canvas { width: 100% !important; height: 100% !important; }
+  </style>
+</head>
+<body>
+  <h1 id="title">Occupancy Sweep</h1>
+  <p class="subtitle" id="subtitle">Loading...</p>
+
+  <div id="badgeRow" class="badge-row"></div>
+
+  <div class="top-row">
+    <div class="info-grid" id="infoGrid"></div>
+    <div class="insights-panel" id="insightsPanel" style="display:none;"></div>
+  </div>
+
+  <div class="chart-section">
+    <h2>Warp Occupancy vs Block Size</h2>
+    <div class="chart-wrap"><canvas id="occChart"></canvas></div>
+  </div>
+
+  <div class="chart-section">
+    <h2>Concurrent Blocks per SM vs Block Size</h2>
+    <div class="chart-wrap"><canvas id="blocksChart"></canvas></div>
+  </div>
+
+  <div class="chart-section">
+    <h2>Resource Limits (blocks allowed by each constraint)</h2>
+    <div class="chart-wrap"><canvas id="limitsChart"></canvas></div>
+  </div>
+
+  <script nonce="{{NONCE}}" src="{{CHART_JS_URI}}"></script>
+  <script nonce="{{NONCE}}">
+    (function () {
+      var vscode = acquireVsCodeApi();
+
+      var fg = getComputedStyle(document.documentElement)
+        .getPropertyValue("--vscode-foreground").trim() || "#ccc";
+      var gridColor = getComputedStyle(document.documentElement)
+        .getPropertyValue("--vscode-panel-border").trim() || "#333";
+
+      var LIMIT_COLORS = {
+        threads:     "rgba(79,193,255,0.7)",
+        warps:       "rgba(137,209,133,0.7)",
+        shared_mem:  "rgba(232,171,83,0.7)",
+        registers:   "rgba(241,76,76,0.7)",
+        block_limit: "rgba(177,128,215,0.7)",
+      };
+      var LIMIT_LABELS = {
+        threads: "Threads", warps: "Warps", shared_mem: "Shared Mem",
+        registers: "Registers", block_limit: "Block Limit",
+      };
+      var MEM_CLASS_COLORS = {
+        memory_bound:     "rgba(241,76,76,1)",
+        compute_friendly: "rgba(137,209,133,1)",
+        reuse_optimized:  "rgba(79,193,255,1)",
+        balanced:         "rgba(177,128,215,1)",
+      };
+      var BOTTLENECK_LABELS = {
+        register_spill:     "Register Spill",
+        memory_latency:     "Memory Latency",
+        memory_bandwidth:   "Memory Bandwidth",
+        atomic_contention:  "Atomic Contention",
+        sfu_throughput:     "SFU Throughput",
+        sync_overhead:      "Sync Overhead",
+        uncoalesced_access: "Uncoalesced Access",
+        occupancy:          "Low Occupancy",
+        compute_bound:      "Compute Bound",
+        none:               "No Bottleneck",
+      };
+      var BADGE_ICONS = {
+        spill: "\u26a0", uncoalesced: "U", atomic: "A",
+        sync: "\u21bb", tensor: "\u25a3", tensor_miss: "\u25a1", sfu: "\u0192",
+      };
+
+      var commonScaleOpts = {
+        ticks: { color: fg },
+        grid: { color: gridColor },
+        title: { color: fg, display: true },
+      };
+
+      function esc(s) { var d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+      // ── Insights panel ──
+      function renderInsights(ins) {
+        var el = document.getElementById("insightsPanel");
+        if (!ins) { el.style.display = "none"; return; }
+        el.style.display = "";
+        var cls = ins.primaryBottleneck === "none" ? "none" : "primary";
+        var label = BOTTLENECK_LABELS[ins.primaryBottleneck] || ins.primaryBottleneck;
+        var html = '<h3>Analysis</h3>';
+        html += '<div class="bottleneck-tag ' + cls + '">' + esc(label) + '</div>';
+        if (ins.secondaryBottlenecks && ins.secondaryBottlenecks.length > 0) {
+          for (var i = 0; i < ins.secondaryBottlenecks.length; i++) {
+            var sl = BOTTLENECK_LABELS[ins.secondaryBottlenecks[i]] || ins.secondaryBottlenecks[i];
+            html += ' <span class="bottleneck-tag secondary">' + esc(sl) + '</span>';
+          }
+        }
+        // Memory + Pattern summary
+        html += '<div class="insights-section"><div class="section-label">Memory</div>';
+        html += esc(ins.memoryClass);
+        if (ins.arithmeticIntensity != null) {
+          html += ' &middot; intensity ' + ins.arithmeticIntensity.toFixed(2);
+        }
+        html += '</div>';
+        html += '<div class="insights-section"><div class="section-label">Pattern</div>';
+        html += esc(ins.patternClass);
+        if (ins.archetype) html += ' &middot; ' + esc(ins.archetype);
+        html += '</div>';
+        // Suggestions (max 3)
+        if (ins.suggestions && ins.suggestions.length > 0) {
+          html += '<div class="insights-section"><div class="section-label">Suggestions</div>';
+          html += '<ul class="suggestion-list">';
+          for (var j = 0; j < Math.min(ins.suggestions.length, 3); j++) {
+            html += '<li>' + esc(ins.suggestions[j]) + '</li>';
+          }
+          html += '</ul></div>';
+        }
+        el.innerHTML = html;
+      }
+
+      // ── Signal badges ──
+      function renderBadges(signals) {
+        var row = document.getElementById("badgeRow");
+        if (!signals || signals.length === 0) { row.innerHTML = ""; return; }
+        row.innerHTML = signals.map(function(s) {
+          var icon = BADGE_ICONS[s.id] || "";
+          return '<span class="badge ' + s.severity + '">' + icon + " " + esc(s.label) + '</span>';
+        }).join("");
+      }
+
+      // ── Occupancy chart with colored segments + limit-change markers ──
+      function buildOccChart(ctx, data) {
+        var labels = data.points.map(function(p) { return p.blockSize; });
+        var occValues = data.points.map(function(p) { return Math.round(p.occupancy * 1000) / 10; });
+        var ins = data.insights;
+
+        // Color line by memory class (if known)
+        var lineColor = "rgba(79,193,255,1)";
+        var fillColor = "rgba(79,193,255,0.15)";
+        if (ins) {
+          lineColor = MEM_CLASS_COLORS[ins.memoryClass] || lineColor;
+          fillColor = lineColor.replace(",1)", ",0.12)");
+        }
+
+        // Mark where limiting factor changes
+        var limitChangePoints = new Array(labels.length).fill(null);
+        for (var i = 1; i < data.points.length; i++) {
+          if (data.points[i].limitingFactor !== data.points[i - 1].limitingFactor) {
+            limitChangePoints[i] = occValues[i];
+          }
+        }
+
+        var datasets = [{
+          label: "Occupancy %",
+          data: occValues,
+          borderColor: lineColor,
+          backgroundColor: fillColor,
+          fill: true,
+          tension: 0.2,
+          pointRadius: 2,
+          pointHoverRadius: 5,
+        }];
+
+        // Limit-change markers
+        var hasLimitChanges = limitChangePoints.some(function(v) { return v !== null; });
+        if (hasLimitChanges) {
+          datasets.push({
+            label: "Limit changes",
+            data: limitChangePoints,
+            borderColor: "rgba(232,171,83,1)",
+            backgroundColor: "rgba(232,171,83,0.8)",
+            pointRadius: 6,
+            pointStyle: "triangle",
+            showLine: false,
+          });
+        }
+
+        // Current config marker
+        if (data.currentBlockSize != null) {
+          var idx = labels.indexOf(data.currentBlockSize);
+          if (idx >= 0) {
+            var highlight = new Array(labels.length).fill(null);
+            highlight[idx] = occValues[idx];
+            datasets.push({
+              label: "Current config",
+              data: highlight,
+              borderColor: "rgba(232,171,83,1)",
+              backgroundColor: "rgba(232,171,83,1)",
+              pointRadius: 8,
+              pointStyle: "rectRot",
+              showLine: false,
+            });
+          }
+        }
+
+        return new Chart(ctx, {
+          type: "line",
+          data: { labels: labels, datasets: datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { labels: { color: fg } },
+              tooltip: {
+                callbacks: {
+                  label: function(item) { return item.parsed.y + "%"; },
+                  afterBody: function(items) {
+                    if (!items || items.length === 0) return "";
+                    var di = items[0].dataIndex;
+                    var p = data.points[di];
+                    if (!p) return "";
+                    var lines = ["Limit: " + (LIMIT_LABELS[p.limitingFactor] || p.limitingFactor),
+                                 "Blocks/SM: " + p.blocksPerSm];
+                    if (ins) {
+                      lines.push("Memory: " + ins.memoryClass);
+                      if (ins.arithmeticIntensity != null) {
+                        lines.push("Intensity: " + ins.arithmeticIntensity.toFixed(2) + " ops/B");
+                      }
+                    }
+                    return lines;
+                  },
+                },
+              },
+            },
+            scales: {
+              x: Object.assign({}, commonScaleOpts, { title: Object.assign({}, commonScaleOpts.title, { text: "Block Size (threads)" }) }),
+              y: Object.assign({}, commonScaleOpts, { title: Object.assign({}, commonScaleOpts.title, { text: "Occupancy (%)" }), min: 0, max: 100 }),
+            },
+          },
+        });
+      }
+
+      // ── Blocks per SM chart with enriched tooltips ──
+      function buildBlocksChart(ctx, data) {
+        var labels = data.points.map(function(p) { return p.blockSize; });
+        var values = data.points.map(function(p) { return p.blocksPerSm; });
+        var bgColors = data.points.map(function(p) { return LIMIT_COLORS[p.limitingFactor] || "rgba(200,200,200,0.6)"; });
+        var ins = data.insights;
+
+        return new Chart(ctx, {
+          type: "bar",
+          data: {
+            labels: labels,
+            datasets: [{
+              label: "Blocks / SM",
+              data: values,
+              backgroundColor: bgColors,
+              borderColor: bgColors.map(function(c) { return c.replace("0.7", "1"); }),
+              borderWidth: 1,
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  afterLabel: function(item) {
+                    var p = data.points[item.dataIndex];
+                    var lines = ["Limit: " + (LIMIT_LABELS[p.limitingFactor] || p.limitingFactor)];
+                    if (ins && ins.signals) {
+                      var flags = ins.signals.map(function(s) { return s.label; }).join(", ");
+                      if (flags) lines.push("Signals: " + flags);
+                    }
+                    return lines;
+                  },
+                },
+              },
+            },
+            scales: {
+              x: Object.assign({}, commonScaleOpts, { title: Object.assign({}, commonScaleOpts.title, { text: "Block Size (threads)" }) }),
+              y: Object.assign({}, commonScaleOpts, { title: Object.assign({}, commonScaleOpts.title, { text: "Blocks / SM" }), beginAtZero: true }),
+            },
+          },
+        });
+      }
+
+      // ── Resource limits grouped bar ──
+      function buildLimitsChart(ctx, data) {
+        var step = 4;
+        var sampled = data.points.filter(function(_, i) { return i % step === 0 || i === data.points.length - 1; });
+        var labels = sampled.map(function(p) { return p.blockSize; });
+        var keys = ["blocksByThreads", "blocksByWarps", "blocksByShared", "blocksByRegisters", "blocksByBlockLimit"];
+        var limitKeys = ["threads", "warps", "shared_mem", "registers", "block_limit"];
+
+        var datasets = keys.map(function(k, i) {
+          return {
+            label: LIMIT_LABELS[limitKeys[i]],
+            data: sampled.map(function(p) { return Math.min(p[k], 48); }),
+            backgroundColor: LIMIT_COLORS[limitKeys[i]],
+            borderColor: LIMIT_COLORS[limitKeys[i]].replace("0.7", "1"),
+            borderWidth: 1,
+          };
+        });
+
+        return new Chart(ctx, {
+          type: "bar",
+          data: { labels: labels, datasets: datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: fg } } },
+            scales: {
+              x: Object.assign({}, commonScaleOpts, { title: Object.assign({}, commonScaleOpts.title, { text: "Block Size (threads)" }) }),
+              y: Object.assign({}, commonScaleOpts, { title: Object.assign({}, commonScaleOpts.title, { text: "Max Blocks (capped at 48)" }), beginAtZero: true }),
+            },
+          },
+        });
+      }
+
+      // ── Info cards ──
+      function renderInfo(data) {
+        var grid = document.getElementById("infoGrid");
+        var cards = [
+          { label: "GPU", value: data.gpu },
+          { label: "Registers / Thread", value: data.registersPerThread },
+          { label: "Shared Mem / Block", value: data.sharedMemPerBlock + " B" },
+        ];
+        if (data.currentBlockSize != null) {
+          var cur = data.points.find(function(p) { return p.blockSize === data.currentBlockSize; });
+          if (cur) {
+            cards.push({ label: "Current Block Size", value: data.currentBlockSize });
+            cards.push({ label: "Current Occupancy", value: Math.round(cur.occupancy * 1000) / 10 + "%" });
+            cards.push({ label: "Current Limit", value: LIMIT_LABELS[cur.limitingFactor] || cur.limitingFactor });
+          }
+        }
+        var best = data.points.reduce(function(a, b) { return b.occupancy > a.occupancy ? b : a; }, data.points[0]);
+        if (best) {
+          cards.push({ label: "Peak Occupancy", value: Math.round(best.occupancy * 1000) / 10 + "% @ " + best.blockSize });
+        }
+        grid.innerHTML = cards.map(function(c) {
+          return '<div class="info-card"><div class="label">' + esc(String(c.label)) + '</div><div class="value">' + esc(String(c.value)) + '</div></div>';
+        }).join("");
+      }
+
+      // ── Message handler ──
+      window.addEventListener("message", function(event) {
+        var data = event.data;
+        if (!data || !data.points) return;
+
+        document.getElementById("subtitle").textContent =
+          data.gpu + " \u2014 regs=" + data.registersPerThread + ", shared=" + data.sharedMemPerBlock + " B";
+
+        renderInfo(data);
+        renderInsights(data.insights);
+        renderBadges(data.insights ? data.insights.signals : null);
+        buildOccChart(document.getElementById("occChart"), data);
+        buildBlocksChart(document.getElementById("blocksChart"), data);
+        buildLimitsChart(document.getElementById("limitsChart"), data);
+      });
+
+      vscode.postMessage({ type: "ready" });
+    })();
+  </script>
+</body>
+</html>
