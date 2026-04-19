@@ -1344,3 +1344,84 @@ describe("pattern_model — stall inference, warp primitives, archetypes", () =>
     expect(out.archetype).toBe("reduction");
   });
 });
+
+describe("pattern_model — group A/C derived signals", () => {
+  function trivialPtx(name: string): string {
+    return (
+      PTX_HEAD +
+      `\n.visible .entry ${name}(.param .u64 p) {\n  .reg .f32 %f<4>; .reg .u64 %rd<4>;\n  ret;\n}\n`
+    );
+  }
+
+  it("computes_spill_and_productive_fractions", () => {
+    let a = 0x2e00;
+    const lines = ["Function : _Z8spillSigK", ""];
+    lines.push(`${sassHx(a)} LDL R0, [R2];`); a += 0x10;
+    lines.push(`${sassHx(a)} STL [R4], R0;`); a += 0x10;
+    lines.push(`${sassHx(a)} LDG.E.32 R1, [R2];`); a += 0x10;
+    lines.push(`${sassHx(a)} STG.E.32 [R4], R1;`); a += 0x10;
+    lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`); a += 0x10;
+    const out = analyzePattern(
+      featuresFromPtx(trivialPtx("_Z8spillSigK"), "_Z8spillSigK"),
+      featuresFromSass(lines.join("\n"), "_Z8spillSigK")
+    );
+    expect(out.spill_risk).toBe(true);
+    expect(out.spill_severity).toBeGreaterThan(0.3);
+    expect(out.productive_instruction_fraction).toBeGreaterThan(0.5);
+  });
+
+  it("computes_tensor_utilization_and_fp_to_int_ratio", () => {
+    let a = 0x2f00;
+    const lines = ["Function : _Z9tensorIntK", ""];
+    for (let i = 0; i < 6; i++) {
+      lines.push(`${sassHx(a)} HMMA.16816.F32 {R0,R1,R2,R3},{R4,R5},{R6,R7},{R0,R1,R2,R3};`);
+      a += 0x10;
+    }
+    for (let i = 0; i < 2; i++) {
+      lines.push(`${sassHx(a)} IADD R0, R1, R2;`);
+      a += 0x10;
+    }
+    for (let i = 0; i < 4; i++) {
+      lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`);
+      a += 0x10;
+    }
+    const out = analyzePattern(
+      featuresFromPtx(trivialPtx("_Z9tensorIntK"), "_Z9tensorIntK"),
+      featuresFromSass(lines.join("\n"), "_Z9tensorIntK")
+    );
+    expect(out.tensor_utilization_fraction).toBeGreaterThan(0.45);
+    expect(out.fp_to_int_ratio).toBeGreaterThan(0.5);
+  });
+
+  it("computes_shared_reuse_and_store_uncoalesced_risk", () => {
+    let a = 0x3000;
+    const lines = ["Function : _Z10storeRiskK", ""];
+    for (let i = 0; i < 8; i++) {
+      lines.push(`${sassHx(a)} LDS.32 R0, [R2];`);
+      a += 0x10;
+    }
+    lines.push(`${sassHx(a)} BAR.SYNC 0;`); a += 0x10;
+    lines.push(`${sassHx(a)} BAR.SYNC 0;`); a += 0x10;
+    for (let i = 0; i < 6; i++) {
+      lines.push(`${sassHx(a)} STG.E.32 [R4], R0;`);
+      a += 0x10;
+    }
+    const out = analyzePattern(
+      featuresFromPtx(ptxOneLoop(), "_Z5k_loop"),
+      featuresFromSass(lines.join("\n"), "_Z10storeRiskK")
+    );
+    expect(out.shared_reuse_per_barrier).toBeGreaterThan(2);
+    expect(out.store_uncoalesced_risk).toBe(true);
+  });
+
+  it("computes_warp_divergence_risk_from_loop_and_branch", () => {
+    const ptx = featuresFromPtx(ptxTwoLoops(), "_Z8k_2loops");
+    let a = 0x3100;
+    const lines = ["Function : _Z8k_2loops", ""];
+    lines.push(`${sassHx(a)} BRA 0x200;`); a += 0x10;
+    lines.push(`${sassHx(a)} BRA 0x220;`); a += 0x10;
+    lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`); a += 0x10;
+    const out = analyzePattern(ptx, featuresFromSass(lines.join("\n"), "_Z8k_2loops"));
+    expect(out.warp_divergence_risk).toBe(true);
+  });
+});

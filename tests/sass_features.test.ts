@@ -347,4 +347,33 @@ describe("sass_features — atomic/SFU/FP16-scalar detection", () => {
     const [, f] = extractSassFeatures(lines, undefined);
     expect(f.warp_vote_ops).toBe(0);
   });
+
+  it("integer_opcodes_counted_as_integer_ops", () => {
+    const lines = [
+      "Function : _ZN7intops7kernelEv",
+      "",
+      `    /*0000*/ IADD R0, R1, R2;`,
+      `    /*0010*/ IMAD R3, R4, R5, R6;`,
+      `    /*0020*/ ISET.LT.AND P0, PT, R7, R8, PT;`,
+      `    /*0030*/ IXOR R9, R10, R11;`,
+      `    /*0040*/ ISHL R12, R13, 0x2;`,
+      `    /*0050*/ FFMA.FTZ R0, R1, R2, R3;`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.integer_ops).toBe(5);
+    expect(f.arithmetic_ops).toBe(3);
+  });
+
+  it("fp_only_kernel_has_zero_integer_ops", () => {
+    const lines = [
+      "Function : _ZN6fponly7kernelEv",
+      "",
+      `    /*0000*/ FFMA.FTZ R0, R1, R2, R3;`,
+      `    /*0010*/ FADD R4, R5, R6;`,
+      `    /*0020*/ FMUL R7, R8, R9;`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.integer_ops).toBe(0);
+    expect(f.arithmetic_ops).toBe(3);
+  });
 });

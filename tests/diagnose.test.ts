@@ -60,14 +60,22 @@ function patStub(overrides: Partial<PatternResult> = {}): PatternResult {
     sync_efficiency: "none",
     interleaving: "none",
     spill_risk: false,
+    spill_severity: 0,
     uncoalesced_risk: false,
+    store_uncoalesced_risk: false,
     missing_tensor_cores: false,
     atomic_contention_risk: false,
     sfu_heavy: false,
     vectorization_score: 1,
+    store_vectorization_score: 1,
     over_synchronized: false,
     fp16_scalar_risk: false,
     read_modify_write: false,
+    tensor_utilization_fraction: 0,
+    productive_instruction_fraction: 0,
+    shared_reuse_per_barrier: 0,
+    warp_divergence_risk: false,
+    fp_to_int_ratio: 0,
     stall_memory_dependency: false,
     stall_memory_throttle: false,
     stall_local_memory: false,
@@ -203,6 +211,14 @@ describe("diagnoseKernel", () => {
     expect(d.optimization_priority[0]).toContain("Transpose");
   });
 
+  it("rule7_uncoalesced_access_when_store_uncoalesced_risk", () => {
+    const mem = memStub("balanced");
+    const occ = occStub(0.6);
+    const pat = patStub({ store_uncoalesced_risk: true });
+    const d = diagnoseKernel(mem, occ, pat);
+    expect(d.primary_bottleneck).toBe("uncoalesced_access");
+  });
+
   // ── Rule 9: compute_bound ─────────────────────────────────────────────────
 
   it("rule9_compute_bound_when_compute_friendly_and_missing_tensor_cores", () => {
@@ -221,7 +237,7 @@ describe("diagnoseKernel", () => {
     const occ = occStub(0.8);
     const pat = patStub();
     const d = diagnoseKernel(mem, occ, pat);
-    expect(d.primary_bottleneck).toBe("none");
+    expect(d.primary_bottleneck).toBe("none_detected");
     expect(d.secondary_bottlenecks).toHaveLength(0);
     expect(d.confidence).toBe(0);
   });

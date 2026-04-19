@@ -130,6 +130,7 @@ evicted live values to L1/L2/DRAM-backed local memory at 100+ cycle latency per 
 | Field | Type | SASS Opcodes | Notes |
 |-------|------|-------------|-------|
 | `arithmetic_ops` | `number` | `FFMA`, `FADD`, `FMUL`, `IADD`, `IMAD`, `IMUL`, `HFMA`, `HADD`, `HMUL` | All scalar FP/int arithmetic (FP16 scalar is also a subset) |
+| `integer_ops` | `number` | `IADD`, `IMAD`, `IMUL`, `IMNMX`, `ISCADD`, `ISET`, `ICMP`, `IABS`, `INEG`, `IAND`, `IOR`, `IXOR`, `ISHL`, `ISHR` | Integer/address/control-heavy subset used by `fp_to_int_ratio` |
 | `fp16_arith_ops` | `number` | `HFMA`, `HADD`, `HMUL` | Scalar FP16 subset — **also** counted in `arithmetic_ops` |
 
 #### Tensor core
@@ -213,6 +214,7 @@ consumes it.
 | `shared_mem_per_block` | — | `ptx.static_shared` (bytes) or launch param | Occupancy |
 | `cache_policy` | `sass.cg_loads > 0 → "L2"; sass.cs_loads > 0 → "streaming"` | `null` | Memory |
 | `tensor_ops` | `sass.tensor_ops` | 0 | Pattern |
+| `integer_ops` | `sass.integer_ops` | 0 | Pattern (`fp_to_int_ratio`) |
 | `wmma_ops` | `sass.wmma_ops` | 0 | Pattern, Memory |
 | `local_loads` | `sass.local_loads` | 0 | Pattern |
 | `local_stores` | `sass.local_stores` | 0 | Pattern |
@@ -221,7 +223,7 @@ consumes it.
 | `sfu_ops` | `sass.sfu_ops` | 0 | Pattern, Memory |
 | `fp16_arith_ops` | `sass.fp16_arith_ops` | 0 | Pattern |
 | `ldg_128/64/32` | `sass.ldg_128/64/32` | 0 | Pattern (vectorization_score), Memory |
-| `stg_128/64/32` | `sass.stg_128/64/32` | 0 | Memory (store byte estimate) |
+| `stg_128/64/32` | `sass.stg_128/64/32` | 0 | Memory (store byte estimate + store_vectorization_score), Pattern (store-side coalescing/vectorization) |
 | `stream_interleave_score` | `sass.stream_interleave_score` | 0 | Pattern (interleaving) |
 | `max_consecutive_loads` | `sass.stream_max_consecutive_loads` | 0 | Pattern (interleaving) |
 | `warp_shuffle_ops` | `sass.warp_shuffle_ops` | 0 | Pattern (F2/F4 warp primitives) |
@@ -271,6 +273,9 @@ flops_proxy = scalar_flops + tensor_fp_flops + tensor_int_flops + sfu_flops
 | `reuse_ratio` | `shared_loads / global_loads` |
 | `reuse_strength` | `shared_loads / global_mem_ops` |
 | `mem_compute_ratio` | `bytes_moved / flops` |
+| `store_vectorization_score` | `(stg_128×4 + stg_64×2 + stg_32×1) / (totalStgTyped × 4)` (0 when `< 4` typed stores) |
+| `load_store_ratio` | `global_loads / (global_stores + 1)` |
+| `load_store_balance` | `"read_dominated"` if ratio > 4.0; `"write_dominated"` if ratio < 0.5; else `"balanced"` |
 
 ### Step 4 — Classification
 
@@ -347,7 +352,9 @@ active_warps_per_sm = min(blocks_per_sm × warpsPerBlock, smMaxWarps)
 occupancy           = active_warps_per_sm / smMaxWarps   [0.0 – 1.0]
 ```
 
-**`KernelAnalysis` fields:** `occupancy_class` = `"low"` (<0.30) | `"medium"` (<0.60) | `"high"` (≥0.60); `warp_metrics`; `waste_metrics` (unused resource fractions per SM).
+**`KernelAnalysis` fields:** `occupancy_class` = `"low"` (<0.30) | `"medium"` (<0.60) | `"high"` (≥0.60); `register_pressure_margin`; `next_occupancy_class`; `warp_metrics`; `waste_metrics` (unused resource fractions per SM).
+
+`register_pressure_margin` is only populated when `limiting_factor = "registers"` and a higher occupancy tier exists; it reports regs/thread to shed to reach `next_occupancy_class`.
 
 **`OccupancyModelResult` fields:** `class` (same tier string), `confidence` (0.65–0.85), `limiting_factor`, `blocks_per_sm`, `threads_per_block`, `shared_mem_per_block`, `registers_per_thread`, `sources` (origin of each parameter), `insight`.
 
@@ -404,6 +411,7 @@ Note: `estimated_sm_utilization` is on `KernelAnalysis` only. `OccupancyModelRes
 | `workPerBarrier` | `computeOps / (barriers + 1)` | > 100: efficient; > 30: moderate; else: inefficient |
 | `loopDensity` | `loops / (computeOps + 1)` | > 0.05 → high-looping |
 | `totalLdgTyped` | `ldg_128 + ldg_64 + ldg_32` | ≥ 4 for vectorization_score |
+| `totalStgTyped` | `stg_128 + stg_64 + stg_32` | ≥ 4 for store_vectorization_score |
 
 ### Step 3 — Primary class decision tree
 
@@ -445,7 +453,9 @@ traffic; `"ptx"` otherwise.  SASS presence adds `+0.1` to confidence.
 | Flag | Formula / Condition | SASS Required? |
 |------|---------------------|----------------|
 | `spill_risk` | `local_loads + local_stores > 0` | Yes (always false without SASS) |
+| `spill_severity` | `(local_loads + local_stores) / total_instructions` | Yes (0 when SASS unavailable) |
 | `uncoalesced_risk` | `ldg_32 / totalLdgTyped > 0.75` AND `totalLdgTyped > 4` AND `globalOps > 4` | Yes |
+| `store_uncoalesced_risk` | `stg_32 / totalStgTyped > 0.75` AND `totalStgTyped > 4` AND `globalOps > 4` | Yes |
 | `missing_tensor_cores` | `!tensor_ops && computeToMemory > 4.0 && computeOps > 16` | No (SASS refines) |
 | `atomic_contention_risk` | `global_atomic_ops > 0 && globalOps > 0 && global_atomic_ops / globalOps > 0.05` — uses **global-only** atomics; ATOMS (shared-memory) is excluded to prevent false positives | Yes |
 | `sfu_heavy` | `sfu_ops > 8 && sfu_ops / (computeOps + sfu_ops + 1) > 0.15` | Yes |
@@ -453,6 +463,17 @@ traffic; `"ptx"` otherwise.  SASS presence adds `+0.1` to confidence.
 | `over_synchronized` | `loops > 0 && barriers ≥ 2 && barriers / loops > 1.5` | No (uses PTX loops + SASS barriers). **Caveat:** `loops` comes from PTX backward-branch-edge counting; fully compiler-unrolled loops produce `loops = 0`, causing this signal to be permanently `false` even when barriers far outnumber logical iterations. |
 | `fp16_scalar_risk` | `fp16_arith_ops > 8 && wmma_ops = 0 && fp16_arith_ops / (computeOps + 1) > 0.2` | Yes |
 | `read_modify_write` | `storeToLoadRatio ∈ (0.5, 2.0) && computeToMemory < 1.0 && globalOps > 4` | No (SASS preferred) |
+
+### Step 5b — Additional Derived Pattern Signals (Groups A/C)
+
+| Signal | Formula / Condition | Notes |
+|--------|---------------------|-------|
+| `tensor_utilization_fraction` | `tensor_ops / (arithmetic_ops + tensor_ops + 1)` | Continuous tensor-core adoption score, 0–1 |
+| `productive_instruction_fraction` | `(arithmetic_ops + tensor_ops + global_loads + global_stores) / total_instructions` | Instruction-level useful-work share |
+| `shared_reuse_per_barrier` | `shared_loads / (barriers + 1)` | Cooperative phase amortization quality |
+| `warp_divergence_risk` | `(branches × loops) / (computeOps + 1) > 0.01` | Loop-aware divergence risk |
+| `store_vectorization_score` | `(stg_128×4 + stg_64×2 + stg_32×1) / (totalStgTyped × 4)` | 0.25–1.0 active range; 0 when inactive |
+| `fp_to_int_ratio` | `(arithmetic_ops - integer_ops) / (integer_ops + 1)` | FP-vs-address/integer mix indicator |
 
 ### Step 6 — Stall Reason Inference (Group E)
 
@@ -513,7 +534,7 @@ Fuses all three models into a single cross-model bottleneck report.  Operates en
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `primary_bottleneck` | `string` | Tag for the dominant bottleneck (see rule table below); `"none"` when no rules fire |
+| `primary_bottleneck` | `string` | Tag for the dominant bottleneck (see rule table below); `"none_detected"` when no rules fire |
 | `secondary_bottlenecks` | `string[]` | Tags for additional active bottlenecks, ordered by rule priority |
 | `stall_profile.memory_dependency` | `boolean` | `pattern.stall_memory_dependency` |
 | `stall_profile.memory_throttle` | `boolean` | `pattern.stall_memory_throttle` |
@@ -534,7 +555,7 @@ All rules are evaluated; the first match becomes `primary_bottleneck`; all subse
 | 4 | `atomic_contention` | `pattern.atomic_contention_risk AND pattern.read_modify_write` | Privatize; warp-shuffle reduction before atomic |
 | 5 | `sfu_throughput` | `pattern.sfu_heavy AND memory.class ≠ "memory_bound"` | Replace MUFU with polynomial approximation |
 | 6 | `sync_overhead` | `pattern.stall_sync AND pattern.class = "tiled"` | Merge tile phases; reduce barriers per loop |
-| 7 | `uncoalesced_access` | `pattern.uncoalesced_risk` | Transpose; SoA layout |
+| 7 | `uncoalesced_access` | `pattern.uncoalesced_risk OR pattern.store_uncoalesced_risk` | Transpose; SoA layout |
 | 8 | `occupancy` | `occ.limiting_factor = "registers" AND occupancy < 0.4` | Use `__launch_bounds__` |
 | 9 | `compute_bound` | `memory.class = "compute_friendly" AND pattern.missing_tensor_cores` | Switch to Tensor Core API |
 
@@ -556,10 +577,11 @@ All rules are evaluated; the first match becomes `primary_bottleneck`; all subse
 | `ptx.static_shared` (hint) | — | ✓ | — |
 | `sass.global_loads/stores` | ✓ | — | ✓ |
 | `sass.ldg_128/64/32` | ✓ (byte calc) | — | ✓ (vectorization_score) |
-| `sass.stg_128/64/32` | ✓ (byte calc) | — | — |
+| `sass.stg_128/64/32` | ✓ (byte calc + store_vectorization_score) | — | ✓ (store_vectorization_score, store_uncoalesced_risk) |
 | `sass.cg_loads / cs_loads` | ✓ (cache_policy) | — | — |
 | `sass.shared_loads/stores` | ✓ | — | ✓ |
 | `sass.arithmetic_ops` | ✓ (scalar flops) | — | ✓ |
+| `sass.integer_ops` | — | — | ✓ (`fp_to_int_ratio`) |
 | `sass.tensor_ops` | ✓ (int MMA flops) | — | ✓ |
 | `sass.wmma_ops` | ✓ (FP MMA flops) | — | ✓ |
 | `sass.sfu_ops` | ✓ (SFU flops) | — | ✓ |

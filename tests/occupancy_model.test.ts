@@ -244,4 +244,18 @@ describe("occupancy_model — gap fixes", () => {
     const lowActive  = parseInt(kaLow.estimated_sm_utilization!.split(" ")[0]!);
     expect(highActive).toBeGreaterThanOrEqual(lowActive);
   });
+
+  it("register_pressure_margin_populated_when_register_limited", () => {
+    const ka = analyzeKernel(256, 0, 160, AMPERE_LIKE_DEFAULT);
+    expect(ka.limiting_factor).toBe("registers");
+    expect(ka.register_pressure_margin).toBeDefined();
+    expect(ka.register_pressure_margin!).toBeGreaterThan(0);
+    expect(["medium", "high"]).toContain(ka.next_occupancy_class);
+  });
+
+  it("register_pressure_margin_undefined_when_not_register_limited", () => {
+    const ka = analyzeKernel(256, 0, 32, AMPERE_LIKE_DEFAULT);
+    expect(ka.register_pressure_margin).toBeUndefined();
+    expect(ka.next_occupancy_class).toBeUndefined();
+  });
 });
