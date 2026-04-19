@@ -14,7 +14,8 @@
     "onCommand:cudaAnalyzer.run",
     "onCommand:paxzas.analyzeActiveFile",
     "onCommand:paxzas.analyzeSelectedFile",
-    "onCommand:paxzas.analyzeWithLaunchSpec"
+    "onCommand:paxzas.analyzeWithLaunchSpec",
+    "onCommand:paxzas.occupancySweep"
   ],
   "main": "./out/extension.js",
   "scripts": {
@@ -44,6 +45,11 @@
       {
         "command": "paxzas.analyzeWithLaunchSpec",
         "title": "Paxzas: Analyze CUDA File with Launch Spec"
+      },
+      {
+        "command": "paxzas.occupancySweep",
+        "title": "Paxzas: Occupancy Sweep (Chart)",
+        "icon": "$(graph)"
       }
     ],
     "menus": {
@@ -60,6 +66,11 @@
         },
         {
           "command": "cudaAnalyzer.run",
+          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
+          "group": "navigation"
+        },
+        {
+          "command": "paxzas.occupancySweep",
           "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
           "group": "navigation"
         }
@@ -79,6 +90,11 @@
           "command": "cudaAnalyzer.run",
           "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
           "group": "navigation"
+        },
+        {
+          "command": "paxzas.occupancySweep",
+          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
+          "group": "navigation"
         }
       ],
       "editor/title": [
@@ -91,11 +107,20 @@
           "command": "paxzas.analyzeWithLaunchSpec",
           "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass || resourceExtname == .s",
           "group": "navigation@2"
+        },
+        {
+          "command": "paxzas.occupancySweep",
+          "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass || resourceExtname == .s",
+          "group": "navigation@3"
         }
       ],
       "commandPalette": [
         {
           "command": "cudaAnalyzer.run",
+          "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass"
+        },
+        {
+          "command": "paxzas.occupancySweep",
           "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass"
         }
       ]
