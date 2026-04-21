@@ -8,7 +8,7 @@ import { resolveGpuSpecForAnalysis } from "./analyzer/gpu_spec";
 import { mergeLaunchWithHints } from "./analyzer/merge_launch";
 import { extractSassFeatures } from "./analyzer/sass_features";
 import { sweepBlockSizes, buildSignals, type KernelInsights } from "./analyzer/occupancy_sweep";
-import { showOccupancySweepPanel } from "./webview/occupancyPanel";
+import { showKernelDiagnosisPanel, buildDiagnosisPayload } from "./webview/diagnosisPanel";
 
 const OUTPUT_CHANNEL_ID = "cudaAnalyzer";
 
@@ -278,12 +278,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "paxzas.occupancySweep",
+      "paxzas.kernelDiagnosis",
       async (uri?: vscode.Uri) => {
-        await runOccupancySweepCommand(context, uri);
+        await runKernelDiagnosisCommand(context, uri);
       }
     )
   );
+
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
@@ -340,107 +341,173 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
-async function runOccupancySweepCommand(
+
+/** Flatten SassInstructionFeatures to a plain Record<string, number> for webview transfer. */
+function flattenSassFeatures(
+  sass: ReturnType<typeof extractSassFeatures>[1]
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  const skip = new Set(["instruction_sequence"]);
+  for (const [k, v] of Object.entries(sass)) {
+    if (!skip.has(k) && typeof v === "number") {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/** Shared source-text resolution used by the new panel commands. */
+async function resolveSourceText(
+  uri: vscode.Uri | undefined,
+  placeHolder: string
+): Promise<{ text: string; sourceUri: vscode.Uri } | undefined> {
+  if (uri) {
+    return { text: await readFileText(uri), sourceUri: uri };
+  }
+  const editor = vscode.window.activeTextEditor;
+  if (editor && isSupportedDocument(editor.document)) {
+    return {
+      text: await textFromDocument(editor.document),
+      sourceUri: editor.document.uri,
+    };
+  }
+  const uris = await findCudaArtifactUris();
+  if (uris.length === 0) {
+    void vscode.window.showWarningMessage("No .ptx or .sass files found.");
+    return undefined;
+  }
+  let picked: vscode.Uri;
+  if (uris.length === 1) {
+    picked = uris[0]!;
+  } else {
+    const items = uris.map((u) => ({
+      label: vscode.workspace.asRelativePath(u, false),
+      description: u.fsPath,
+      uri: u,
+    }));
+    const sel = await vscode.window.showQuickPick(items, {
+      placeHolder,
+      matchOnDescription: true,
+    });
+    if (!sel) return undefined;
+    picked = sel.uri;
+  }
+  return { text: await readFileText(picked), sourceUri: picked };
+}
+
+async function runKernelDiagnosisCommand(
   context: vscode.ExtensionContext,
   uri?: vscode.Uri
 ): Promise<void> {
-  let text: string;
-  let sourceUri: vscode.Uri | undefined;
-
-  if (uri) {
-    text = await readFileText(uri);
-    sourceUri = uri;
-  } else {
-    const editor = vscode.window.activeTextEditor;
-    if (editor && isSupportedDocument(editor.document)) {
-      text = await textFromDocument(editor.document);
-      sourceUri = editor.document.uri;
-    } else {
-      const uris = await findCudaArtifactUris();
-      if (uris.length === 0) {
-        void vscode.window.showWarningMessage("No .ptx or .sass files found.");
-        return;
-      }
-      if (uris.length === 1) {
-        sourceUri = uris[0];
-      } else {
-        const items = uris.map((u) => ({
-          label: vscode.workspace.asRelativePath(u, false),
-          description: u.fsPath,
-          uri: u,
-        }));
-        const sel = await vscode.window.showQuickPick(items, {
-          placeHolder: "Select PTX/SASS file for occupancy sweep",
-          matchOnDescription: true,
-        });
-        sourceUri = sel?.uri;
-      }
-      if (!sourceUri) return;
-      text = await readFileText(sourceUri);
-    }
-  }
-
+  const src = await resolveSourceText(uri, "Select PTX/SASS file for kernel analysis");
+  if (!src) return;
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: "Occupancy Sweep", cancellable: false },
+    { location: vscode.ProgressLocation.Notification, title: "Kernel Analysis", cancellable: false },
     async () => {
       await new Promise<void>((r) => setImmediate(r));
-
       const gpuPreset = gpuPresetFromSettings();
       const { spec } = await resolveGpuSpecForAnalysis(gpuPreset, {
-        ptxText: text,
+        ptxText: src.text,
         enableLocalCudaDetect: true,
       });
-
-      let registers = 32;
-      let shared = 0;
-      let currentBlockSize: number | undefined;
-
-      const sassText = await supplementalSassForPtx(sourceUri);
+      const sassText = await supplementalSassForPtx(src.sourceUri);
+      const report = await analyze(src.text, {}, undefined, sassText, gpuPreset);
+      if (report.error) {
+        void vscode.window.showErrorMessage(`Kernel Analysis failed: ${report.error}`);
+        return;
+      }
+      let sassFlatFeatures: Record<string, number> | undefined;
       let sassRegisters: number | undefined;
       if (sassText) {
         const [, sassInstr] = extractSassFeatures(sassText, undefined);
+        sassFlatFeatures = flattenSassFeatures(sassInstr);
         if (sassInstr.max_register_index >= 0) {
           sassRegisters = sassInstr.max_register_index + 1;
         }
       }
 
+      // Compute occupancy sweep (same logic as the old standalone sweep command)
+      let registers = 32;
+      let shared = 0;
+      let currentBlockSize: number | undefined;
       try {
-        const merged = mergeLaunchWithHints(text, undefined, {}, sassRegisters ?? null);
+        const merged = mergeLaunchWithHints(src.text, undefined, {}, sassRegisters ?? null);
         registers = merged.registers;
         shared = merged.shared;
         currentBlockSize = merged.threads;
       } catch {
         if (sassRegisters != null) registers = sassRegisters;
       }
-
-      let insights: KernelInsights | undefined;
-      try {
-        const report = await analyze(text, {}, undefined, sassText, gpuPreset);
-        if (!report.error && report.memory && report.pattern) {
-          const signals = buildSignals(report.pattern, report.memory);
-          insights = {
-            memoryClass: report.memory.class,
-            memoryInsight: report.memory.insight,
-            arithmeticIntensity: report.memory.arithmetic_intensity_ops_per_byte,
-            patternClass: report.pattern.class,
-            patternInsight: report.pattern.insight,
-            archetype: report.pattern.archetype,
-            primaryBottleneck: report.diagnosis?.primary_bottleneck ?? "none",
-            secondaryBottlenecks: report.diagnosis?.secondary_bottlenecks ?? [],
-            suggestions: report.diagnosis?.optimization_priority?.slice(0, 3) ?? [],
-            signals,
-            diagnosisConfidence: report.diagnosis?.confidence ?? 0,
-          };
-        }
-      } catch {
-        // Analysis failed; sweep still works without insights
+      // Build KernelInsights for sweep (populates per-point limit colors etc.)
+      let sweepInsights: KernelInsights | undefined;
+      if (!report.error && report.memory && report.pattern) {
+        const signals = buildSignals(report.pattern, report.memory);
+        sweepInsights = {
+          memoryClass: report.memory.class,
+          memoryInsight: report.memory.insight,
+          memoryConfidence: report.memory.confidence,
+          arithmeticIntensity: report.memory.arithmetic_intensity_ops_per_byte,
+          cachePolicy: report.memory.cache_policy,
+          reuseRatio: report.memory.reuse_ratio,
+          memComputeRatio: report.memory.mem_compute_ratio,
+          loadStoreRatio: report.memory.load_store_ratio,
+          patternClass: report.pattern.class,
+          patternInsight: report.pattern.insight,
+          patternConfidence: report.pattern.confidence,
+          archetype: report.pattern.archetype,
+          archetypeDescriptors: [],
+          primaryBottleneck: report.diagnosis?.primary_bottleneck ?? "none_detected",
+          secondaryBottlenecks: report.diagnosis?.secondary_bottlenecks ?? [],
+          suggestions: report.diagnosis?.optimization_priority?.slice(0, 3) ?? [],
+          signals,
+          occupancyConfidence: report.occupancy_model?.confidence ?? 0,
+          diagnosisConfidence: report.diagnosis?.confidence ?? 0,
+          stallProfile: {
+            memoryDependency: report.diagnosis?.stall_profile.memory_dependency ?? false,
+            memoryThrottle: report.diagnosis?.stall_profile.memory_throttle ?? false,
+            localMemory: report.diagnosis?.stall_profile.local_memory ?? false,
+            sync: report.diagnosis?.stall_profile.sync ?? false,
+          },
+          launchWarnings: report.kernel?.warnings ?? [],
+          sources: report.occupancy_model?.sources ?? { threads: "unknown", shared: "unknown", registers: "unknown" },
+          registerPressureMargin: report.kernel?.register_pressure_margin,
+          nextOccupancyClass: report.kernel?.next_occupancy_class,
+          estimatedSmUtilization: report.kernel?.estimated_sm_utilization,
+          wasteMetrics: report.kernel ? {
+            unusedThreadsPerSm: report.kernel.waste_metrics.unused_threads_per_sm,
+            unusedWarpsPerSm: report.kernel.waste_metrics.unused_warps_per_sm,
+            unusedRegistersPerSm: report.kernel.waste_metrics.unused_registers_per_sm,
+            unusedSharedMemBytesPerSm: report.kernel.waste_metrics.unused_shared_mem_bytes_per_sm,
+          } : undefined,
+          vectorizationScore: report.pattern.vectorization_score,
+          storeVectorizationScore: report.memory.store_vectorization_score,
+          storeUncoalescedRisk: report.pattern.store_uncoalesced_risk,
+          ptxOnly: !sassText,
+        };
       }
+      const sweepResult = sweepBlockSizes(shared, registers, spec, currentBlockSize, sweepInsights);
 
-      const sweep = sweepBlockSizes(shared, registers, spec, currentBlockSize, insights);
-      showOccupancySweepPanel(context.extensionUri, sweep);
+      const payload = buildDiagnosisPayload(
+        src.sourceUri.fsPath,
+        report,
+        spec,
+        sassFlatFeatures,
+        {
+          registersPerThread: registers,
+          sharedMemPerBlock: shared,
+          currentBlockSize,
+          points: sweepResult.points,
+        }
+      );
+      if (!payload) {
+        void vscode.window.showWarningMessage("Kernel Analysis: insufficient data from analysis.");
+        return;
+      }
+      showKernelDiagnosisPanel(context.extensionUri, payload);
     }
   );
 }
+
 
 function parseLaunchSpec(
   raw: string

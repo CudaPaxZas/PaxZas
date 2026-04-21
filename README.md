@@ -9,9 +9,10 @@ Local **PTX / SASS / CUDA** analysis inside VS Code: no Python, no network. Heur
 | **Paxzas: Analyze Active CUDA File** | Analyze the open `.ptx`, `.cu`, or `.sass` file. |
 | **Paxzas: Analyze Selected File** | From Explorer, analyze the selected artifact. |
 | **Paxzas: Analyze CUDA File with Launch Spec** | Optional `threads=…,shared=…,regs=…` overrides. |
+| **Paxzas: Occupancy Sweep (Chart)** | Webview: occupancy vs block size, plus compact insights (see `OCCUPANCY_SWEEP_UI.md`). |
 | **Run CUDA Kernel Analysis** | Legacy entry; same analysis path. |
 
-Results go to the **CUDA Analyzer** output channel (and a short notification).
+Results go to the **CUDA Analyzer** output channel (and a short notification), except the occupancy sweep which opens a **webview panel**.
 
 ## Settings
 

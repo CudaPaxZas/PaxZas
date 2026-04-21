@@ -21,17 +21,22 @@ A second layer answers: **why the kernel might still be slow** (memory vs comput
 ## Layout (top to bottom)
 
 1. **Subtitle** — GPU name and resolved `regs=` / `shared=` used for the sweep.
-2. **Signal badges** — Up to a few high-signal flags (e.g. register spill, poor coalescing, atomics, sync overhead, tensor-core hints). Severity drives color (error / warn / info).
-3. **Info cards** — GPU, registers/thread, shared bytes/block, current launch block size (if known), current occupancy and limiter at that size, peak occupancy in the sweep.
-4. **Insights panel** (right column on wide layouts) — Single “Analysis” summary:
+2. **Confidence/source strip** — Memory, pattern, occupancy, diagnosis confidence plus launch-source provenance (`threads/shared/registers`).
+3. **Archetype/PTX caveat banners** — archetype callout when available; PTX-only caveat ribbon when SASS is absent.
+4. **Stall profile pills** — 4 on/off pills for memory dependency, memory throttle, local-memory pressure, sync overhead.
+5. **Signal badges** — High-signal flags (spill, coalescing, atomics, sync, tensor, SFU, vectorization scores).
+6. **Info cards** — GPU, registers/thread, shared bytes/block, current launch block size (if known), current occupancy and limiter at that size, peak occupancy in the sweep, register what-if (`-N regs -> next tier`), and SM utilization when available.
+7. **Insights panel** (right column on wide layouts) — Single “Analysis” summary:
    - Primary (and optional secondary) bottleneck tags from `diagnoseKernel`
-   - Memory class and arithmetic intensity (ops/byte)
-   - Pattern class and optional archetype
+   - Memory class + `memoryInsight`, arithmetic intensity (ops/byte)
+   - Pattern class + `patternInsight`, optional archetype
    - At most **three** optimisation suggestions from the diagnosis ordering
-5. **Charts** (unchanged count: three panels):
+8. **Launch warnings** — Collapsible list from `KernelAnalysis.warnings`.
+9. **Charts** (now four panels):
    - **Warp occupancy vs block size** — Line chart; optional markers where the **limiting factor** changes; current block size highlighted when known; line tint reflects **memory class** when insights exist.
-   - **Blocks per SM** — Bars colored by limiting factor; tooltips mention active signal labels when insights exist.
+   - **Blocks per SM** — Bars colored by limiting factor; includes an architectural max reference line and per-limit block detail in tooltip.
    - **Resource limits** — Grouped bars (sampled block sizes) for max blocks allowed under each hardware constraint (capped visually for readability).
+   - **Waste mix** — Doughnut chart from `waste_metrics` at the current configuration.
 
 ## Tooltips
 

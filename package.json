@@ -15,7 +15,7 @@
     "onCommand:paxzas.analyzeActiveFile",
     "onCommand:paxzas.analyzeSelectedFile",
     "onCommand:paxzas.analyzeWithLaunchSpec",
-    "onCommand:paxzas.occupancySweep"
+    "onCommand:paxzas.kernelDiagnosis"
   ],
   "main": "./out/extension.js",
   "scripts": {
@@ -47,9 +47,9 @@
         "title": "Paxzas: Analyze CUDA File with Launch Spec"
       },
       {
-        "command": "paxzas.occupancySweep",
-        "title": "Paxzas: Occupancy Sweep (Chart)",
-        "icon": "$(graph)"
+        "command": "paxzas.kernelDiagnosis",
+        "title": "Paxzas: Kernel Analysis",
+        "icon": "$(search)"
       }
     ],
     "menus": {
@@ -70,7 +70,7 @@
           "group": "navigation"
         },
         {
-          "command": "paxzas.occupancySweep",
+          "command": "paxzas.kernelDiagnosis",
           "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
           "group": "navigation"
         }
@@ -92,7 +92,7 @@
           "group": "navigation"
         },
         {
-          "command": "paxzas.occupancySweep",
+          "command": "paxzas.kernelDiagnosis",
           "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
           "group": "navigation"
         }
@@ -109,7 +109,7 @@
           "group": "navigation@2"
         },
         {
-          "command": "paxzas.occupancySweep",
+          "command": "paxzas.kernelDiagnosis",
           "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass || resourceExtname == .s",
           "group": "navigation@3"
         }
@@ -120,7 +120,7 @@
           "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass"
         },
         {
-          "command": "paxzas.occupancySweep",
+          "command": "paxzas.kernelDiagnosis",
           "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass"
         }
       ]
