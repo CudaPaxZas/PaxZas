@@ -234,21 +234,123 @@ export const AMPERE_LIKE_DEFAULT: GpuSpec = {
   smCount: undefined,
 };
 
+export interface GpuPresetMetadata {
+  key: string;
+  label: string;
+  cc: GpuComputeCapabilityKey;
+  smTag: string;
+  smCount: number | undefined;
+}
+
 /** Named preset configurations (human-friendly config values). */
-const PRESET_ARCH: Record<string, GpuComputeCapabilityKey> = {
-  "ampere-like-default": "8.6",
-  a100: "8.0",
-  "rtx-4090": "8.9",
+const PRESET_METADATA: Record<string, Omit<GpuPresetMetadata, "key">> = {
+  "ampere-like-default": {
+    label: "Ampere-like default (SM86)",
+    cc: "8.6",
+    smTag: "sm_86",
+    smCount: undefined,
+  },
+  a100: {
+    label: "A100 (SM80)",
+    cc: "8.0",
+    smTag: "sm_80",
+    smCount: 108,
+  },
+  "rtx-4090": {
+    label: "RTX 4090 (SM89)",
+    cc: "8.9",
+    smTag: "sm_89",
+    smCount: 128,
+  },
+  "h100-sxm": {
+    label: "H100 SXM (SM90)",
+    cc: "9.0",
+    smTag: "sm_90",
+    smCount: 132,
+  },
+  "h100-pcie": {
+    label: "H100 PCIe (SM90)",
+    cc: "9.0",
+    smTag: "sm_90",
+    smCount: 114,
+  },
+  h200: {
+    label: "H200 (SM90)",
+    cc: "9.0",
+    smTag: "sm_90",
+    smCount: 132,
+  },
+  b200: {
+    label: "B200 (SM100)",
+    cc: "10.0",
+    smTag: "sm_100",
+    smCount: 192,
+  },
+  gb200: {
+    label: "GB200 (SM100)",
+    cc: "10.0",
+    smTag: "sm_100",
+    smCount: 192,
+  },
+  "blackwell-consumer-default": {
+    label: "Blackwell consumer default (SM120)",
+    cc: "12.0",
+    smTag: "sm_120",
+    smCount: undefined,
+  },
 };
+
+const PRESET_ARCH: Record<string, GpuComputeCapabilityKey> = Object.fromEntries(
+  Object.entries(PRESET_METADATA).map(([key, meta]) => [key, meta.cc])
+) as Record<string, GpuComputeCapabilityKey>;
 
 /** Named preset SM counts (device-specific). */
-const PRESET_SM_COUNT: Record<string, number | undefined> = {
-  "ampere-like-default": undefined,
-  a100: 108,
-  "rtx-4090": 128,
-};
+const PRESET_SM_COUNT: Record<string, number | undefined> = Object.fromEntries(
+  Object.entries(PRESET_METADATA).map(([key, meta]) => [key, meta.smCount])
+) as Record<string, number | undefined>;
 
-export const KNOWN_PRESET_KEYS = Object.keys(PRESET_ARCH).sort() as string[];
+export const KNOWN_PRESET_KEYS = Object.keys(PRESET_METADATA).sort() as string[];
+
+export function getPresetMetadata(name: string): GpuPresetMetadata {
+  const key = name.trim().toLowerCase();
+  const meta = PRESET_METADATA[key];
+  if (!meta) {
+    throw new Error(
+      `Unknown GPU preset ${JSON.stringify(name)}; known: ${KNOWN_PRESET_KEYS.join(", ")}`
+    );
+  }
+  return {
+    key,
+    ...meta,
+  };
+}
+
+export function allPresetMetadata(): GpuPresetMetadata[] {
+  return KNOWN_PRESET_KEYS.map((k) => ({ key: k, ...PRESET_METADATA[k]! }));
+}
+
+export function presetForSmVersion(sm: number): GpuPresetMetadata | undefined {
+  const smTag = `sm_${sm}`;
+  const matches = allPresetMetadata().filter((p) => p.smTag === smTag);
+  if (matches.length === 0) {
+    return undefined;
+  }
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  if (sm === 90) {
+    return matches.find((p) => p.key === "h100-sxm") ?? matches[0];
+  }
+  if (sm === 100) {
+    return matches.find((p) => p.key === "b200") ?? matches[0];
+  }
+  // Prefer architecture defaults when multiple product presets share the same SM.
+  return (
+    matches.find((p) =>
+      p.key.includes("default") || p.key === "ampere-like-default"
+    ) ?? matches[0]
+  );
+}
 
 /**
  * GPU name pattern -> SM count heuristic.
@@ -366,14 +468,8 @@ function resolveSmCountAndSource(
  * @throws Error if name not in presets
  */
 export function getPreset(name: string): GpuSpec {
-  const key = name.trim().toLowerCase();
-  const cc = PRESET_ARCH[key];
-  if (!cc) {
-    throw new Error(
-      `Unknown GPU preset ${JSON.stringify(name)}; known: ${KNOWN_PRESET_KEYS.join(", ")}`
-    );
-  }
-  return gpuSpecFromArch(cc, PRESET_SM_COUNT[key]);
+  const meta = getPresetMetadata(name);
+  return gpuSpecFromArch(meta.cc, meta.smCount);
 }
 
 /**

@@ -159,6 +159,7 @@ function emptySass(): SassInstructionFeatures {
 }
 
 const FUNCTION_RE = /^\s*Function\s*:\s*(.+?)\s*$/;
+const SASS_SM_TARGET_RE = /\b(?:code\s+for\s+sm_|arch\s*=\s*sm_|sm_)(\d{2,3})\b/gi;
 /**
  * Matches the opcode from a cuobjdump SASS disassembly line.
  * The non-capturing group `(?:@!?P\d+\s+)` strips predicate guards such as
@@ -474,4 +475,17 @@ export function inferRegistersPerThreadFromSass(
     return undefined;
   }
   return instr.max_register_index + 1;
+}
+
+export function detectSassSmTargets(sassText: string): number[] {
+  const out = new Set<number>();
+  let m: RegExpExecArray | null;
+  SASS_SM_TARGET_RE.lastIndex = 0;
+  while ((m = SASS_SM_TARGET_RE.exec(sassText)) !== null) {
+    const sm = parseInt(m[1]!, 10);
+    if (Number.isFinite(sm) && sm > 0) {
+      out.add(sm);
+    }
+  }
+  return Array.from(out.values()).sort((a, b) => a - b);
 }

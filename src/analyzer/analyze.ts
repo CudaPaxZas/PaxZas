@@ -9,9 +9,9 @@ import {
   emptyInstructionFeatures,
 } from "./ptx_features";
 import { extractPtxKernelsMerged } from "./parallel_kernel_extract";
-import { extractSassFeatures } from "./sass_features";
+import { detectSassSmTargets, extractSassFeatures } from "./sass_features";
 import { mergeLaunchWithHints } from "./merge_launch";
-import { resolveGpuSpecForAnalysis } from "./gpu_spec";
+import { getPresetMetadata, resolveGpuSpecForAnalysis } from "./gpu_spec";
 import type { PtxKernelHints } from "./ptx_parse";
 import { runModelsParallelOrSync } from "./run_models_parallel";
 import { diagnoseKernel } from "./diagnose";
@@ -57,6 +57,22 @@ export interface AnalyzerReport {
   gpu_spec_resolution?: string;
   /** Cross-model diagnosis: primary bottleneck, stall profile, optimisation plan. */
   diagnosis?: DiagnosisResult;
+  /** SASS compute capabilities detected in the input/supplemental dump (sm_XX). */
+  sass_detected_targets?: string[];
+  /** Analysis alignment mode between SASS target and selected capability preset. */
+  analysis_mode?: "native" | "cross-arch-what-if" | "preset-only-what-if";
+  /** Human-readable detail for alignment mode. */
+  analysis_mode_note?: string;
+}
+
+function parseSmFromSpecName(specName: string): number | undefined {
+  const m = /sm(\d{2,3})/i.exec(specName);
+  return m ? parseInt(m[1]!, 10) : undefined;
+}
+
+function parseSmVersionFromTag(smTag: string): number | undefined {
+  const m = /sm_(\d{2,3})/i.exec(smTag.trim());
+  return m ? parseInt(m[1]!, 10) : undefined;
 }
 
 function hintsToPublic(h: PtxKernelHints | null): AnalyzerReport["ptx_hints"] {
@@ -95,17 +111,37 @@ export async function analyze(
   let sassKernel: string | undefined;
   let sassInstr: ReturnType<typeof extractSassFeatures>[1] | undefined;
   let sassRegisters: number | undefined;
+  let sassTargets: number[] = [];
 
   let sassText: string | undefined = supplementalSass;
   if (!sassText && looksLikeSassDump(text) && !hasPtxEntry(text)) {
     sassText = text;
   }
   if (sassText) {
+    sassTargets = detectSassSmTargets(sassText);
     [sassKernel, sassInstr] = extractSassFeatures(sassText, kernelSubstring);
     if (sassInstr.max_register_index >= 0) {
       sassRegisters = sassInstr.max_register_index + 1;
     }
   }
+  const sassTargetTags = sassTargets.map((sm) => `sm_${sm}`);
+  const presetMeta =
+    gpuPreset.trim().toLowerCase() !== "auto" ? getPresetMetadata(gpuPreset) : undefined;
+  const presetSm = presetMeta ? parseSmVersionFromTag(presetMeta.smTag) : undefined;
+  const resolvedSm = parseSmFromSpecName(spec.name);
+  const expectedSm = presetSm ?? resolvedSm;
+  const analysisMode: AnalyzerReport["analysis_mode"] =
+    sassTargets.length === 0
+      ? "preset-only-what-if"
+      : expectedSm !== undefined && sassTargets.includes(expectedSm)
+        ? "native"
+        : "cross-arch-what-if";
+  const analysisModeNote =
+    analysisMode === "native"
+      ? `SASS targets (${sassTargetTags.join(", ")}) include resolved capability sm_${expectedSm}.`
+      : analysisMode === "cross-arch-what-if"
+        ? `SASS targets (${sassTargetTags.join(", ")}) do not include resolved capability sm_${expectedSm ?? "?"}; results are cross-arch what-if.`
+        : `No architecture markers found in SASS; results use preset/resolved capability ${spec.name} as a what-if target.`;
 
   if (sassText && !hasPtxEntry(text)) {
     const instr = emptyInstructionFeatures();
@@ -130,9 +166,14 @@ export async function analyze(
     return {
       kind: "sass_only",
       gpu_spec_resolution: gpuSpecResolution,
+      sass_detected_targets: sassTargetTags,
+      analysis_mode: analysisMode,
+      analysis_mode_note: analysisModeNote,
       ptx_kernel: sassKernel,
       ptx_hints: null,
-      ptx_features: { ...buildFeatureBundle(registers, instr), registers },
+      // SASS-only: no PTX instruction counts exist — only store the resolved register count
+      // so the Raw tab shows "—" for PTX instruction keys rather than misleading 0s.
+      ptx_features: { registers },
       register_source:
         sassRegisters !== undefined ? "sass.inferred" : "unknown",
       register_estimates: {
@@ -187,6 +228,9 @@ export async function analyze(
     return {
       kind: "ptx",
       gpu_spec_resolution: gpuSpecResolution,
+      sass_detected_targets: sassTargetTags,
+      analysis_mode: analysisMode,
+      analysis_mode_note: analysisModeNote,
       ptx_kernel: merged.hints.kernelName,
       ptx_hints: hintsToPublic(merged.hints),
       ptx_features: feat,
@@ -213,6 +257,9 @@ export async function analyze(
       error: msg,
       kind: "ptx",
       gpu_spec_resolution: gpuSpecResolution,
+      sass_detected_targets: sassTargetTags,
+      analysis_mode: analysisMode,
+      analysis_mode_note: analysisModeNote,
       register_estimates: {
         ptx_maxnreg: undefined,
         sass_inferred: sassRegisters ?? null,

@@ -4,3 +4,11 @@ tsconfig.json
 **/*.map
 node_modules/**
 tests/**
+ChatGPT Image*.png
+*.sass
+*.cu
+build-vsix.sh
+SWEEP_UI.md
+FEATURE_REFERENCE.md
+vitest.config.mjs
+*.vsix

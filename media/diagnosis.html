@@ -126,12 +126,26 @@
     .region-badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 12px; font-weight: 500; }
     .memory-bound  { background: rgba(241,76,76,0.15); color: var(--red); }
     .compute-bound { background: rgba(79,193,255,0.12); color: var(--accent); }
+
+    .cap-bar { display: flex; align-items: center; gap: 10px; padding: 8px 20px; border-bottom: 1px solid var(--border); background: var(--card-bg); flex-wrap: wrap; }
+    .cap-bar label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .cap-select { background: var(--vscode-dropdown-background, #3c3c3c); color: var(--fg); border: 1px solid var(--border); border-radius: 3px; font-size: 12px; padding: 3px 8px; font-family: inherit; min-width: 220px; }
+    .cap-mode-badge { font-size: 11px; padding: 2px 8px; border-radius: 3px; white-space: nowrap; }
+    .cap-mode-badge.native      { background: rgba(137,209,133,0.15); color: var(--green); }
+    .cap-mode-badge.what-if     { background: rgba(232,171,83,0.12); color: var(--orange); }
+    .cap-mode-badge.preset-only { background: rgba(79,193,255,0.10); color: var(--muted); }
   </style>
 </head>
 <body>
   <div class="page-header">
     <h1 id="pageTitle">Kernel Analysis</h1>
     <div class="sub" id="pageSub">Loading…</div>
+  </div>
+
+  <div class="cap-bar" id="capBar" style="display:none;">
+    <label>GPU / Capability:</label>
+    <select class="cap-select" id="capSelect"></select>
+    <span class="cap-mode-badge" id="capModeBadge"></span>
   </div>
 
   <div class="tab-bar" id="tabBar">
@@ -141,6 +155,7 @@
     <button class="tab-btn" data-tab="memory">Memory</button>
     <button class="tab-btn" data-tab="pattern">Pattern</button>
     <button class="tab-btn active" data-tab="occupancy">Occupancy</button>
+    <button class="tab-btn" data-tab="capabilities">Capabilities</button>
     <button class="tab-btn" data-tab="roofline">Roofline</button>
     <button class="tab-btn" data-tab="instmix">Instruction Mix</button>
     <button class="tab-btn" data-tab="raw">Raw Features</button>
@@ -221,6 +236,18 @@
     </div>
   </div>
 
+  <!-- ── Capabilities ─────────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-capabilities">
+    <div class="card">
+      <div class="card-title">All Presets — What-if Comparison</div>
+      <div class="note" style="margin-bottom:10px;margin-top:0;border-top:none;">✓ = SASS binary contains this architecture target (native). All others are what-if estimates.</div>
+      <table class="feature-table">
+        <thead><tr><th>Preset</th><th>SM</th><th>Occupancy</th><th>Limit</th><th>Blocks/SM</th><th>Bottleneck</th></tr></thead>
+        <tbody id="capBody"></tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- ── Roofline ──────────────────────────────────────────────────────── -->
   <div class="tab-content" id="tab-roofline">
     <div class="two-col">
@@ -265,9 +292,9 @@
   <!-- ── Raw Features ──────────────────────────────────────────────────── -->
   <div class="tab-content" id="tab-raw">
     <div class="card">
-      <div class="card-title">PTX vs SASS Feature Fusion</div>
+      <div class="card-title" id="rawTitle">PTX vs SASS Feature Fusion</div>
       <table class="feature-table">
-        <thead><tr><th>Feature</th><th>PTX</th><th>SASS</th></tr></thead>
+        <thead><tr><th>Feature</th><th id="rawColPtx">PTX</th><th id="rawColSass">SASS</th></tr></thead>
         <tbody id="rawBody"></tbody>
       </table>
     </div>
@@ -311,14 +338,14 @@
         shared_mem:"rgba(232,171,83,0.75)", registers:"rgba(241,76,76,0.75)", block_limit:"rgba(177,128,215,0.75)"
       };
       var PEAK_TABLE = {
-        "volta-sm70":      { fp32:15700,  bw:900,   label:"V100"   },
-        "turing-sm75":     { fp32:14100,  bw:448,   label:"T4"     },
-        "ampere-sm80":     { fp32:77600,  bw:2000,  label:"A100"   },
-        "ampere-sm86":     { fp32:35600,  bw:960,   label:"RTX 30" },
-        "ada-sm89":        { fp32:82600,  bw:1008,  label:"RTX 40" },
-        "hopper-sm90":     { fp32:67000,  bw:3350,  label:"H100"   },
-        "blackwell-sm100": { fp32:90000,  bw:8000,  label:"B200"   },
-        "blackwell-sm120": { fp32:55000,  bw:1792,  label:"RTX 50" }
+        "volta-sm70":      { fp32:15700,  bw:900,   label:"V100"    },
+        "turing-sm75":     { fp32:14100,  bw:448,   label:"T4"      },
+        "ampere-sm80":     { fp32:77600,  bw:2000,  label:"A100"    },
+        "ampere-sm86":     { fp32:35600,  bw:960,   label:"RTX 30"  },
+        "ada-sm89":        { fp32:82600,  bw:1008,  label:"RTX 40"  },
+        "hopper-sm90":     { fp32:67000,  bw:3350,  label:"H100"    },
+        "blackwell-sm100": { fp32:90000,  bw:8000,  label:"B200"    },
+        "blackwell-sm120": { fp32:55000,  bw:1792,  label:"RTX 50"  }
       };
 
       var scaleOpts = { ticks:{color:fg}, grid:{color:gridColor}, title:{color:fg, display:true} };
@@ -328,10 +355,73 @@
       function fmt(v,d) { return v==null?"—":Number(v).toFixed(d==null?2:d); }
       function g(feats,k) { return (feats&&feats[k]!=null)?Number(feats[k]):0; }
 
-      // ── Tab switching ──────────────────────────────────────────────────
+      // ── State ──────────────────────────────────────────────────────────
       var tabData = null;
       var chartsBuilt = {};
+      var chartInstances = {};   // id → Chart instance, for destroy-before-rebuild
+      var currentCap = null;     // currently selected capability result
 
+      function destroyChart(id) {
+        if (chartInstances[id]) { chartInstances[id].destroy(); delete chartInstances[id]; }
+      }
+      function makeChart(id, cfg) {
+        destroyChart(id);
+        var c = new Chart(document.getElementById(id), cfg);
+        chartInstances[id] = c;
+        return c;
+      }
+
+      // ── Capability selector ────────────────────────────────────────────
+      function populateCapSelect(d) {
+        var results = d.capabilityResults || [];
+        if (results.length === 0) { document.getElementById("capBar").style.display = "none"; return; }
+        document.getElementById("capBar").style.display = "";
+        var sel = document.getElementById("capSelect");
+        sel.innerHTML = results.map(function(c) {
+          var native = c.isNative ? " ✓" : " ◌";
+          return '<option value="'+esc(c.preset)+'">'+esc(c.label+" ("+c.smTag+")")+native+"</option>";
+        }).join("");
+        sel.value = d.capabilityDefaultPreset || results[0].preset;
+        sel.onchange = function() { selectCapability(sel.value); };
+      }
+
+      function updateCapModeBadge(cap) {
+        var badge = document.getElementById("capModeBadge");
+        var mode = cap.analysisMode || "unknown";
+        if (mode === "native") {
+          badge.textContent = "SASS ✓  native"; badge.className = "cap-mode-badge native";
+        } else if (mode === "cross-arch-what-if" || mode === "preset-only-what-if") {
+          badge.textContent = "◌  what-if"; badge.className = "cap-mode-badge what-if";
+        } else {
+          badge.textContent = mode; badge.className = "cap-mode-badge preset-only";
+        }
+      }
+
+      function selectCapability(preset) {
+        if (!tabData || !tabData.capabilityResults) return;
+        var cap = tabData.capabilityResults.find(function(c){ return c.preset === preset; });
+        if (!cap) cap = tabData.capabilityResults[0];
+        currentCap = cap;
+        document.getElementById("capSelect").value = cap.preset;
+        updateCapModeBadge(cap);
+        // Re-render all arch-dependent sections
+        renderOverview(tabData, cap);
+        renderBottleneck(tabData, cap);
+        renderStalls(tabData, cap);
+        renderOccupancy(tabData, cap);
+        renderCapabilities(tabData, cap);
+        // Rebuild charts for already-visible tabs
+        if (chartsBuilt["occupancy"]) {
+          ["sweepOccChart","sweepBlocksChart","sweepLimitsChart","wasteDonut"].forEach(destroyChart);
+          buildOccupancySweepCharts(tabData, cap);
+        }
+        if (chartsBuilt["roofline"]) {
+          destroyChart("rooflineChart");
+          buildRoofline(tabData, cap);
+        }
+      }
+
+      // ── Tab switching ──────────────────────────────────────────────────
       document.getElementById("tabBar").addEventListener("click", function(e) {
         var btn = e.target.closest(".tab-btn");
         if (!btn) return;
@@ -342,40 +432,42 @@
         document.getElementById("tab-"+tab).classList.add("active");
         if (tabData && !chartsBuilt[tab]) {
           chartsBuilt[tab] = true;
-          if (tab==="occupancy") buildOccupancySweepCharts(tabData);
-          if (tab==="roofline")  buildRoofline(tabData);
+          if (tab==="occupancy") buildOccupancySweepCharts(tabData, currentCap);
+          if (tab==="roofline")  buildRoofline(tabData, currentCap);
           if (tab==="instmix")   buildInstMix(tabData);
         }
       });
 
-      // ── Overview ──────────────────────────────────────────────────────
-      function renderOverview(d) {
-        var conf = d.confidences;
+      // ── Overview  (arch-dependent via cap) ────────────────────────────
+      function renderOverview(d, cap) {
+        var occ   = cap ? cap.occupancy   : d.occupancy;
+        var diag  = cap ? cap.diagnosis   : d.diagnosis;
+        var gpu   = cap ? cap.gpu         : d.gpu;
+        var confO = cap ? cap.confidences.occupancy  : d.confidences.occupancy;
+        var confD = cap ? cap.confidences.diagnosis  : d.confidences.diagnosis;
         document.getElementById("confRow").innerHTML = [
-          '<span class="conf-chip">Memory <b>'+pct(conf.memory)+"</b></span>",
-          '<span class="conf-chip">Pattern <b>'+pct(conf.pattern)+"</b></span>",
-          '<span class="conf-chip">Occupancy <b>'+pct(conf.occupancy)+"</b></span>",
-          '<span class="conf-chip">Diagnosis <b>'+pct(conf.diagnosis)+"</b></span>"
+          '<span class="conf-chip">Memory <b>'+pct(d.confidences.memory)+"</b></span>",
+          '<span class="conf-chip">Pattern <b>'+pct(d.confidences.pattern)+"</b></span>",
+          '<span class="conf-chip">Occupancy <b>'+pct(confO)+"</b></span>",
+          '<span class="conf-chip">Diagnosis <b>'+pct(confD)+"</b></span>"
         ].join("");
-
-        var prim = d.diagnosis.primary_bottleneck;
+        var prim = diag.primary_bottleneck;
         var cls  = (prim==="none"||prim==="none_detected") ? "none" : "primary";
         var cards = [
-          {label:"GPU",             value:d.gpu},
+          {label:"GPU",             value:gpu},
           {label:"Kernel",          value:d.kernelName||"—"},
           {label:"Memory class",    value:d.memory.class},
           {label:"Pattern class",   value:d.pattern.class},
-          {label:"Occupancy",       value:pct(d.occupancy.occupancy)+" ("+d.occupancy.occupancy_class+")"},
+          {label:"Occupancy",       value:pct(occ.occupancy)+" ("+occ.occupancy_class+")"},
           {label:"Primary bottleneck",value:BOTTLENECK_LABELS[prim]||prim}
         ];
         if (d.pattern.archetype) cards.push({label:"Archetype", value:d.pattern.archetype.toUpperCase()});
         document.getElementById("overviewGrid").innerHTML = cards.map(function(c){
           return '<div class="info-card"><div class="label">'+esc(c.label)+'</div><div class="value">'+esc(c.value)+"</div></div>";
         }).join("");
-
         var html = '<div class="card-title">Diagnosis</div>';
-        html += '<span class="tag '+cls+'">'+(BOTTLENECK_LABELS[prim]||prim)+" · "+pct(d.diagnosis.confidence)+"</span>";
-        d.diagnosis.secondary_bottlenecks.forEach(function(b){
+        html += '<span class="tag '+cls+'">'+(BOTTLENECK_LABELS[prim]||prim)+" · "+pct(diag.confidence)+"</span>";
+        diag.secondary_bottlenecks.forEach(function(b){
           html += ' <span class="tag secondary">'+(BOTTLENECK_LABELS[b]||b)+"</span>";
         });
         html += '<div style="margin-top:8px;font-size:12px;color:var(--muted);">'+esc(d.memory.insight)+"</div>";
@@ -383,9 +475,9 @@
         document.getElementById("overviewInsight").innerHTML = html;
       }
 
-      // ── Bottleneck ────────────────────────────────────────────────────
-      function renderBottleneck(d) {
-        var diag = d.diagnosis;
+      // ── Bottleneck  (arch-dependent via cap) ──────────────────────────
+      function renderBottleneck(d, cap) {
+        var diag = cap ? cap.diagnosis : d.diagnosis;
         var all = [{tag:diag.primary_bottleneck,isPrimary:true}].concat(
           diag.secondary_bottlenecks.map(function(t){return{tag:t,isPrimary:false};})
         );
@@ -409,15 +501,15 @@
         document.getElementById("bottleneckList").innerHTML = html;
       }
 
-      // ── Stalls ────────────────────────────────────────────────────────
+      // ── Stalls  (arch-dependent via cap) ──────────────────────────────
       var STALL_INFO = [
         {key:"memory_dependency", label:"Memory dep",     desc:"Back-to-back global loads stall warps on response latency (long scoreboard). Fix: software prefetch, pipeline loads ahead of dependent compute."},
         {key:"memory_throttle",   label:"Memory throttle",desc:"Bandwidth-saturating: good interleaving but more memory than compute. Fix: vectorize to LDG.128, eliminate redundant traffic."},
         {key:"local_memory",      label:"Local memory",   desc:"Register spill I/O (LDL/STL) combined with occupancy < 0.5. Fix: reduce register pressure via __launch_bounds__ or loop restructuring."},
         {key:"sync",              label:"Sync",            desc:"Barrier-dominated tiled kernel (too many __syncthreads() per iteration). Fix: merge cooperative phases, move sync outside inner loops."}
       ];
-      function renderStalls(d) {
-        var sp = d.diagnosis.stall_profile;
+      function renderStalls(d, cap) {
+        var sp = cap ? cap.diagnosis.stall_profile : d.diagnosis.stall_profile;
         document.getElementById("stallPills").innerHTML = STALL_INFO.map(function(s){
           return '<span class="pill '+(!!sp[s.key]?"on":"off")+'">'+esc(s.label)+"</span>";
         }).join("");
@@ -430,7 +522,7 @@
         document.getElementById("stallDetail").innerHTML = '<div class="card-title">Stall Type Details</div>'+html;
       }
 
-      // ── Memory ────────────────────────────────────────────────────────
+      // ── Memory  (instruction-driven, static) ──────────────────────────
       function renderMemory(d) {
         var m = d.memory;
         var rows = [
@@ -456,7 +548,7 @@
         }).join("");
       }
 
-      // ── Pattern ───────────────────────────────────────────────────────
+      // ── Pattern  (instruction-driven, static) ─────────────────────────
       function renderPattern(d) {
         var p = d.pattern;
         var ov = '<div class="card-title">Pattern</div>';
@@ -477,7 +569,6 @@
         ].forEach(function(r){ ov += "<tr><td>"+esc(r[0])+"</td><td>"+esc(r[1])+"</td></tr>"; });
         ov += "</table>";
         document.getElementById("patternOverview").innerHTML = ov;
-
         document.getElementById("microFlags").innerHTML = [
           {key:"spill_risk",              label:"Register spill (LDL/STL)",     bad:true},
           {key:"uncoalesced_risk",         label:"Uncoalesced loads (LDG)",       bad:true},
@@ -498,7 +589,6 @@
           var on=!!p[m.key], cls=(on&&m.bad)?"bad":"ok", icon=(on&&m.bad)?"✗":"✓";
           return '<div class="check-item"><span class="check-icon '+cls+'">'+icon+"</span>"+esc(m.label)+"</div>";
         }).join("");
-
         document.getElementById("warpPrimitives").innerHTML = [
           {key:"uses_warp_shuffle",      label:"Warp shuffle (SHFL.*)"},
           {key:"uses_warp_vote",         label:"Warp vote (VOTE.*/MATCH.*)"},
@@ -509,9 +599,10 @@
         }).join("");
       }
 
-      // ── Occupancy ─────────────────────────────────────────────────────
-      function renderOccupancy(d) {
-        var o = d.occupancy;
+      // ── Occupancy  (arch-dependent via cap) ───────────────────────────
+      function renderOccupancy(d, cap) {
+        var o = cap ? cap.occupancy : d.occupancy;
+        var sw = cap ? cap.sweep : d.sweep;
         var cards = [
           {label:"Threads / Block",   value:o.threads_per_block},
           {label:"Regs / Thread",     value:o.registers_per_thread},
@@ -524,8 +615,6 @@
           cards.push({label:"Register what-if", value:"−"+o.register_pressure_margin+" regs → "+o.next_occupancy_class});
         if (o.estimated_sm_utilization)
           cards.push({label:"SM utilization", value:o.estimated_sm_utilization});
-        // Sweep-derived metrics
-        var sw=d.sweep;
         if (sw&&sw.points&&sw.points.length>0) {
           var best=sw.points.reduce(function(a,b){return b.occupancy>a.occupancy?b:a;},sw.points[0]);
           cards.push({label:"Peak occupancy",value:(Math.round(best.occupancy*1000)/10)+"% @ block "+best.blockSize});
@@ -537,12 +626,15 @@
         document.getElementById("occGrid").innerHTML = cards.map(function(c){
           return '<div class="info-card"><div class="label">'+esc(c.label)+'</div><div class="value">'+esc(c.value)+"</div></div>";
         }).join("");
-
-        var srcEl = document.createElement("div");
-        srcEl.style.cssText = "font-size:11px;color:var(--muted);margin-bottom:10px;";
+        // Use a stable element so re-renders don't stack up duplicate source lines
+        var srcEl = document.getElementById("occSources");
+        if (!srcEl) {
+          srcEl = document.createElement("div");
+          srcEl.id = "occSources";
+          srcEl.style.cssText = "font-size:11px;color:var(--muted);margin-bottom:10px;";
+          document.getElementById("occGrid").after(srcEl);
+        }
         srcEl.innerHTML = "Sources: threads <b>"+esc(o.sources.threads)+"</b> · shared <b>"+esc(o.sources.shared)+"</b> · regs <b>"+esc(o.sources.registers)+"</b>";
-        document.getElementById("occGrid").after(srcEl);
-
         var wm = o.waste_metrics||{};
         document.getElementById("wasteTable").innerHTML = [
           ["Unused threads / SM",         wm.unused_threads_per_sm],
@@ -552,23 +644,24 @@
           ["Allocated regs / block",      wm.allocated_registers_per_block],
           ["Allocated shared / block (B)",wm.allocated_shared_mem_bytes_per_block]
         ].map(function(r){ return "<tr><td>"+esc(r[0])+"</td><td>"+esc(r[1]!=null?r[1]:"—")+"</td></tr>"; }).join("");
-
-        if (o.warnings&&o.warnings.length>0) {
-          document.getElementById("occWarnings").style.display = "";
+        var wo = document.getElementById("occWarnings");
+        wo.style.display = (o.warnings&&o.warnings.length>0) ? "" : "none";
+        if (o.warnings&&o.warnings.length>0)
           document.getElementById("warnList").innerHTML = o.warnings.map(function(w){ return "<li>"+esc(w)+"</li>"; }).join("");
-        }
       }
 
-      function buildOccupancySweepCharts(d) {
-        var sw = d.sweep;
+      function buildOccupancySweepCharts(d, cap) {
+        var sw = cap ? cap.sweep : d.sweep;
+        var wm = cap ? (cap.occupancy.waste_metrics||{}) : (d.occupancy.waste_metrics||{});
         if (!sw || !sw.points || sw.points.length === 0) {
           document.getElementById("occSweep").style.display = "none";
+          makeChart("wasteDonut",{type:"doughnut",data:{labels:[],datasets:[{data:[]}]},options:{responsive:true,maintainAspectRatio:false}});
           return;
         }
+        document.getElementById("occSweep").style.display = "";
         var pts = sw.points;
         var labels = pts.map(function(p){return p.blockSize;});
 
-        // ── Occupancy line ──────────────────────────────────────────────
         var occVals = pts.map(function(p){return Math.round(p.occupancy*1000)/10;});
         var limitChange = labels.map(function(_,i){
           return (i>0 && pts[i].limitingFactor!==pts[i-1].limitingFactor) ? occVals[i] : null;
@@ -579,93 +672,56 @@
           fill:true,tension:0.2,pointRadius:2,pointHoverRadius:5
         }];
         if (limitChange.some(function(v){return v!==null;})) {
-          occDatasets.push({
-            label:"Limit change",data:limitChange,
-            borderColor:"rgba(232,171,83,1)",backgroundColor:"rgba(232,171,83,0.8)",
-            pointRadius:6,pointStyle:"triangle",showLine:false
-          });
+          occDatasets.push({label:"Limit change",data:limitChange,borderColor:"rgba(232,171,83,1)",backgroundColor:"rgba(232,171,83,0.8)",pointRadius:6,pointStyle:"triangle",showLine:false});
         }
-        new Chart(document.getElementById("sweepOccChart"),{
+        makeChart("sweepOccChart",{
           type:"line",data:{labels:labels,datasets:occDatasets},
           options:{responsive:true,maintainAspectRatio:false,
             plugins:{legend:{labels:{color:fg}},tooltip:{callbacks:{
               label:function(item){return item.parsed.y+"%";},
-              afterBody:function(items){
-                var p=pts[items[0].dataIndex];
-                return p?["Limit: "+(LIMIT_LABELS[p.limitingFactor]||p.limitingFactor),"Blocks/SM: "+p.blocksPerSm]:[];
-              }
+              afterBody:function(items){var p=pts[items[0].dataIndex];return p?["Limit: "+(LIMIT_LABELS[p.limitingFactor]||p.limitingFactor),"Blocks/SM: "+p.blocksPerSm]:[];}
             }}},
-            scales:{
-              x:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Block Size (threads)"})}),
-              y:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Occupancy (%)"}),min:0,max:100})
-            }}
+            scales:{x:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Block Size (threads)"})}),y:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Occupancy (%)"}),min:0,max:100})}}
         });
 
-        // ── Blocks per SM bar ───────────────────────────────────────────
         var archMax = pts.length ? pts[0].blocksByBlockLimit : 0;
         var bgColors = pts.map(function(p){return LIMIT_COLORS[p.limitingFactor]||"rgba(200,200,200,0.6)";});
-        new Chart(document.getElementById("sweepBlocksChart"),{
+        makeChart("sweepBlocksChart",{
           type:"bar",
           data:{labels:labels,datasets:[
-            {label:"Blocks / SM",data:pts.map(function(p){return p.blocksPerSm;}),
-              backgroundColor:bgColors,borderColor:bgColors.map(function(c){return c.replace("0.75","1");}),borderWidth:1},
-            {type:"line",label:"Arch max",data:labels.map(function(){return archMax;}),
-              borderColor:"rgba(177,128,215,1)",pointRadius:0,borderDash:[6,4]}
+            {label:"Blocks / SM",data:pts.map(function(p){return p.blocksPerSm;}),backgroundColor:bgColors,borderColor:bgColors.map(function(c){return c.replace("0.75","1");}),borderWidth:1},
+            {type:"line",label:"Arch max",data:labels.map(function(){return archMax;}),borderColor:"rgba(177,128,215,1)",pointRadius:0,borderDash:[6,4]}
           ]},
           options:{responsive:true,maintainAspectRatio:false,
-            plugins:{legend:{labels:{color:fg}},tooltip:{callbacks:{afterLabel:function(item){
-              if(item.datasetIndex!==0) return "";
-              var p=pts[item.dataIndex];
-              return ["Per-limit blocks:","threads: "+p.blocksByThreads,"warps: "+p.blocksByWarps,
-                "shared: "+p.blocksByShared,"registers: "+p.blocksByRegisters,"block limit: "+p.blocksByBlockLimit];
-            }}}},
-            scales:{
-              x:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Block Size (threads)"})}),
-              y:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Blocks / SM"}),beginAtZero:true})
-            }}
+            plugins:{legend:{labels:{color:fg}},tooltip:{callbacks:{afterLabel:function(item){if(item.datasetIndex!==0) return "";var p=pts[item.dataIndex];return ["Per-limit blocks:","threads: "+p.blocksByThreads,"warps: "+p.blocksByWarps,"shared: "+p.blocksByShared,"registers: "+p.blocksByRegisters,"block limit: "+p.blocksByBlockLimit];}}}},
+            scales:{x:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Block Size (threads)"})}),y:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Blocks / SM"}),beginAtZero:true})}}
         });
 
-        // ── Resource limits multi-line vs block size ─────────────────────
         var step=4, sampled=pts.filter(function(_,i){return i%step===0||i===pts.length-1;});
         var sLabels=sampled.map(function(p){return p.blockSize;});
         var lKeys=[["blocksByThreads","threads"],["blocksByWarps","warps"],["blocksByShared","shared_mem"],["blocksByRegisters","registers"],["blocksByBlockLimit","block_limit"]];
-        new Chart(document.getElementById("sweepLimitsChart"),{
+        makeChart("sweepLimitsChart",{
           type:"bar",
-          data:{labels:sLabels,datasets:lKeys.map(function(kl){
-            return{label:LIMIT_LABELS[kl[1]],data:sampled.map(function(p){return Math.min(p[kl[0]],48);}),
-              backgroundColor:LIMIT_COLORS[kl[1]],borderColor:LIMIT_COLORS[kl[1]].replace("0.75","1"),borderWidth:1};
-          })},
-          options:{responsive:true,maintainAspectRatio:false,
-            plugins:{legend:{labels:{color:fg}}},
-            scales:{
-              x:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Block Size (threads)"})}),
-              y:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Max Blocks (capped 48)"}),beginAtZero:true})
-            }}
+          data:{labels:sLabels,datasets:lKeys.map(function(kl){return{label:LIMIT_LABELS[kl[1]],data:sampled.map(function(p){return Math.min(p[kl[0]],48);}),backgroundColor:LIMIT_COLORS[kl[1]],borderColor:LIMIT_COLORS[kl[1]].replace("0.75","1"),borderWidth:1};})},
+          options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:fg}}},scales:{x:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Block Size (threads)"})}),y:Object.assign({},scaleOpts,{title:Object.assign({},scaleOpts.title,{text:"Max Blocks (capped 48)"}),beginAtZero:true})}}
         });
 
-        // ── Waste donut ─────────────────────────────────────────────────
-        var wm=d.occupancy.waste_metrics||{};
-        new Chart(document.getElementById("wasteDonut"),{
+        makeChart("wasteDonut",{
           type:"doughnut",
-          data:{
-            labels:["Unused threads","Unused warps","Unused registers","Unused shared bytes"],
-            datasets:[{data:[wm.unused_threads_per_sm||0,wm.unused_warps_per_sm||0,wm.unused_registers_per_sm||0,wm.unused_shared_mem_bytes_per_sm||0],
-              backgroundColor:["rgba(79,193,255,0.75)","rgba(137,209,133,0.75)","rgba(241,76,76,0.75)","rgba(232,171,83,0.75)"],borderWidth:1}]
-          },
+          data:{labels:["Unused threads","Unused warps","Unused registers","Unused shared bytes"],datasets:[{data:[wm.unused_threads_per_sm||0,wm.unused_warps_per_sm||0,wm.unused_registers_per_sm||0,wm.unused_shared_mem_bytes_per_sm||0],backgroundColor:["rgba(79,193,255,0.75)","rgba(137,209,133,0.75)","rgba(241,76,76,0.75)","rgba(232,171,83,0.75)"],borderWidth:1}]},
           options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:fg}}}}
         });
       }
 
-      // ── Roofline ──────────────────────────────────────────────────────
-      function buildRoofline(d) {
+      // ── Roofline  (arch peak table depends on cap.gpu) ─────────────────
+      function buildRoofline(d, cap) {
+        var gpuName = cap ? cap.gpu : d.gpu;
         var m=d.memory;
-        var perf=PEAK_TABLE[d.gpu]||PEAK_TABLE["ampere-sm86"];
+        var perf=PEAK_TABLE[gpuName]||PEAK_TABLE["ampere-sm86"];
         var peakFp32=perf.fp32, peakBw=perf.bw, ridge=peakFp32/peakBw;
-
         var pts=[];
         for(var i=-2;i<=3;i+=0.05) pts.push(Math.pow(10,i));
         var roofData=pts.map(function(x){return{x:x,y:Math.min(peakFp32,x*peakBw)};});
-
         var intensity=m.arithmetic_intensity_ops_per_byte;
         var kernelPts=[];
         var region="—";
@@ -673,31 +729,20 @@
           kernelPts.push({x:intensity,y:Math.min(peakFp32,intensity*peakBw)});
           region = intensity<ridge ? "Memory-bound" : "Compute-bound";
         }
-
-        new Chart(document.getElementById("rooflineChart"),{
+        makeChart("rooflineChart",{
           type:"scatter",
           data:{datasets:[
             {label:"Roofline (FP32)",data:roofData,type:"line",borderColor:"rgba(79,193,255,0.7)",backgroundColor:"transparent",pointRadius:0,showLine:true,tension:0,borderWidth:2},
             {label:d.kernelName||"Kernel",data:kernelPts,borderColor:"rgba(241,76,76,1)",backgroundColor:"rgba(241,76,76,0.85)",pointRadius:10,pointStyle:"star",pointHoverRadius:13}
           ]},
-          options:{
-            responsive:true,maintainAspectRatio:false,
-            plugins:{legend:{labels:{color:fg}},tooltip:{callbacks:{label:function(item){
-              if(item.datasetIndex===1) return ["Intensity: "+fmt(item.parsed.x,3)+" ops/B","Achievable: "+fmt(item.parsed.y,0)+" GFLOPS (approx.)","Region: "+region];
-              return null;
-            }}}},
-            scales:{
-              x:{type:"logarithmic",ticks:{color:fg},grid:{color:gridColor},title:{display:true,color:fg,text:"Arithmetic Intensity (ops/byte)"}},
-              y:{ticks:{color:fg},grid:{color:gridColor},title:{display:true,color:fg,text:"Achievable GFLOPS (approximate)"},beginAtZero:true}
-            }
-          }
+          options:{responsive:true,maintainAspectRatio:false,
+            plugins:{legend:{labels:{color:fg}},tooltip:{callbacks:{label:function(item){if(item.datasetIndex===1) return ["Intensity: "+fmt(item.parsed.x,3)+" ops/B","Achievable: "+fmt(item.parsed.y,0)+" GFLOPS (approx.)","Region: "+region];return null;}}}},
+            scales:{x:{type:"logarithmic",ticks:{color:fg},grid:{color:gridColor},title:{display:true,color:fg,text:"Arithmetic Intensity (ops/byte)"}},y:{ticks:{color:fg},grid:{color:gridColor},title:{display:true,color:fg,text:"Achievable GFLOPS (approximate)"},beginAtZero:true}}}
         });
-
         var regionHtml = intensity!=null&&isFinite(intensity)
-          ? '<span class="region-badge '+(intensity<ridge?"memory-bound":"compute-bound")+'">'+esc(region)+"</span>"
-          : "—";
+          ? '<span class="region-badge '+(intensity<ridge?"memory-bound":"compute-bound")+'">'+esc(region)+"</span>" : "—";
         document.getElementById("rooflineMetrics").innerHTML = [
-          ["GPU arch",           d.gpu],
+          ["GPU arch",           gpuName],
           ["Peak FP32 (approx.)",fmt(peakFp32,0)+" GFLOPS"],
           ["Peak BW (approx.)",  fmt(peakBw,0)+" GB/s"],
           ["Ridge point",        fmt(ridge,2)+" ops/B"],
@@ -707,101 +752,40 @@
           ["FLOPs proxy",        fmt(m.flops_proxy,0)],
           ["Bytes proxy",        fmt(m.bytes_proxy,0)],
           ["Cache policy",       m.cache_policy||"—"]
-        ].map(function(r){
-          var val = r[0]==="Region" ? r[1] : esc(r[1]);
-          return "<tr><td>"+esc(r[0])+"</td><td>"+val+"</td></tr>";
-        }).join("");
+        ].map(function(r){var val=r[0]==="Region"?r[1]:esc(r[1]);return "<tr><td>"+esc(r[0])+"</td><td>"+val+"</td></tr>";}).join("");
       }
 
-      // ── Instruction Mix ───────────────────────────────────────────────
+      // ── Instruction Mix  (instruction-driven, static) ─────────────────
       function buildInstMix(d) {
         var hasSass=d.hasSass;
         var sass=d.sassFeatures||{}, ptx=d.ptxFeatures||{};
-
         var arithmetic, tensor, sfu, globalMem, sharedMem, localMem, ctrlSync;
         if (hasSass) {
-          arithmetic = g(sass,"arithmetic_ops");
-          tensor     = g(sass,"tensor_ops");
-          sfu        = g(sass,"sfu_ops");
-          globalMem  = g(sass,"global_loads")+g(sass,"global_stores");
-          sharedMem  = g(sass,"shared_loads")+g(sass,"shared_stores");
-          localMem   = g(sass,"local_loads")+g(sass,"local_stores");
-          ctrlSync   = g(sass,"barrier")+g(sass,"branch");
+          arithmetic=g(sass,"arithmetic_ops"); tensor=g(sass,"tensor_ops"); sfu=g(sass,"sfu_ops");
+          globalMem=g(sass,"global_loads")+g(sass,"global_stores"); sharedMem=g(sass,"shared_loads")+g(sass,"shared_stores");
+          localMem=g(sass,"local_loads")+g(sass,"local_stores"); ctrlSync=g(sass,"barrier")+g(sass,"branch");
         } else {
-          arithmetic = g(ptx,"fma")+g(ptx,"add")+g(ptx,"mul");
-          tensor=0; sfu=0; sharedMem=0; localMem=0;
-          globalMem  = g(ptx,"global_loads")+g(ptx,"global_stores");
-          ctrlSync   = g(ptx,"barrier")+g(ptx,"branches");
+          arithmetic=g(ptx,"fma")+g(ptx,"add")+g(ptx,"mul"); tensor=0; sfu=0; sharedMem=0; localMem=0;
+          globalMem=g(ptx,"global_loads")+g(ptx,"global_stores"); ctrlSync=g(ptx,"barrier")+g(ptx,"branches");
         }
-
-        document.getElementById("imSourceTag").innerHTML = hasSass
-          ? '<span class="tag info-tag">SASS</span>'
-          : '<span class="tag secondary">PTX only</span>';
-
-        new Chart(document.getElementById("instmixDonut"),{
+        document.getElementById("imSourceTag").innerHTML = hasSass ? '<span class="tag info-tag">SASS</span>' : '<span class="tag secondary">PTX only</span>';
+        makeChart("instmixDonut",{
           type:"doughnut",
-          data:{
-            labels:["Arithmetic","Tensor","SFU","Global Mem","Shared Mem","Local Mem","Ctrl/Sync"],
-            datasets:[{
-              data:[arithmetic,tensor,sfu,globalMem,sharedMem,localMem,ctrlSync],
-              backgroundColor:["rgba(79,193,255,0.8)","rgba(177,128,215,0.8)","rgba(232,171,83,0.8)","rgba(241,76,76,0.8)","rgba(137,209,133,0.8)","rgba(204,167,0,0.8)","rgba(130,130,130,0.8)"],
-              borderWidth:1
-            }]
-          },
-          options:{
-            responsive:true,maintainAspectRatio:false,
-            plugins:{legend:{labels:{color:fg,font:{size:11}}},tooltip:{callbacks:{label:function(item){
-              var total=[arithmetic,tensor,sfu,globalMem,sharedMem,localMem,ctrlSync].reduce(function(a,b){return a+b;},0);
-              return " "+item.label+": "+item.parsed.toLocaleString()+(total>0?" ("+(item.parsed/total*100).toFixed(1)+"%)":"");
-            }}}}
-          }
+          data:{labels:["Arithmetic","Tensor","SFU","Global Mem","Shared Mem","Local Mem","Ctrl/Sync"],datasets:[{data:[arithmetic,tensor,sfu,globalMem,sharedMem,localMem,ctrlSync],backgroundColor:["rgba(79,193,255,0.8)","rgba(177,128,215,0.8)","rgba(232,171,83,0.8)","rgba(241,76,76,0.8)","rgba(137,209,133,0.8)","rgba(204,167,0,0.8)","rgba(130,130,130,0.8)"],borderWidth:1}]},
+          options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:fg,font:{size:11}}},tooltip:{callbacks:{label:function(item){var total=[arithmetic,tensor,sfu,globalMem,sharedMem,localMem,ctrlSync].reduce(function(a,b){return a+b;},0);return " "+item.label+": "+item.parsed.toLocaleString()+(total>0?" ("+(item.parsed/total*100).toFixed(1)+"%)":"");}}}}}
         });
-
         function makeBar(canvasId,label,fraction,color){
-          new Chart(document.getElementById(canvasId),{
-            type:"bar",
-            data:{labels:[label],datasets:[{label:label,data:[Math.round(fraction*1000)/10],backgroundColor:color,borderWidth:1}]},
-            options:{
-              indexAxis:"y",responsive:true,maintainAspectRatio:false,
-              plugins:{legend:{display:false}},
-              scales:{
-                x:{ticks:{color:fg},grid:{color:gridColor},min:0,max:100,title:{display:true,color:fg,text:"%"}},
-                y:{ticks:{color:fg},grid:{display:false}}
-              }
-            }
-          });
+          makeChart(canvasId,{type:"bar",data:{labels:[label],datasets:[{label:label,data:[Math.round(fraction*1000)/10],backgroundColor:color,borderWidth:1}]},options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:fg},grid:{color:gridColor},min:0,max:100,title:{display:true,color:fg,text:"%"}},y:{ticks:{color:fg},grid:{display:false}}}}});
         }
         makeBar("instmixProdBar",  "Productive",       d.pattern.productive_instruction_fraction,"rgba(79,193,255,0.7)");
         makeBar("instmixTensorBar","Tensor utilization",d.pattern.tensor_utilization_fraction,   "rgba(177,128,215,0.7)");
-
         var sections = [
-          {title:"Global Memory", rows:hasSass?[
-            ["Global loads",     g(sass,"global_loads")],["Global stores",g(sass,"global_stores")],
-            ["LDG.128",g(sass,"ldg_128")],["LDG.64",g(sass,"ldg_64")],["LDG.32",g(sass,"ldg_32")],
-            ["STG.128",g(sass,"stg_128")],["STG.64",g(sass,"stg_64")],["STG.32",g(sass,"stg_32")],
-            ["CG loads",g(sass,"cg_loads")],["CS loads",g(sass,"cs_loads")]
-          ]:[["Global loads",g(ptx,"global_loads")],["Global stores",g(ptx,"global_stores")]]},
-          {title:"Compute", rows:hasSass?[
-            ["Arithmetic ops",g(sass,"arithmetic_ops")],["Integer ops",g(sass,"integer_ops")],
-            ["FP16 scalar ops",g(sass,"fp16_arith_ops")],
-            ["Tensor ops total",g(sass,"tensor_ops")],["WMMA/HMMA (FP)",g(sass,"wmma_ops")],["SFU ops",g(sass,"sfu_ops")]
-          ]:[["FMA",g(ptx,"fma")],["ADD",g(ptx,"add")],["MUL",g(ptx,"mul")]]},
-          {title:"Shared / Local", rows:hasSass?[
-            ["Shared loads",g(sass,"shared_loads")],["Shared stores",g(sass,"shared_stores")],
-            ["Local loads (spill)",g(sass,"local_loads")],["Local stores (spill)",g(sass,"local_stores")]
-          ]:[["(not available from PTX)","—"]]},
-          {title:"Atomics & Warp Primitives", rows:hasSass?[
-            ["Atomic ops (total)",g(sass,"atomic_ops")],["Global atomics (ATOM+RED)",g(sass,"global_atomic_ops")],
-            ["Warp shuffle (SHFL.*)",g(sass,"warp_shuffle_ops")],["Warp vote (VOTE.*)",g(sass,"warp_vote_ops")]
-          ]:[["(not available from PTX)","—"]]},
-          {title:"Control & Sync", rows:hasSass?[
-            ["Barriers (BAR.SYNC)",g(sass,"barrier")],["Branches",g(sass,"branch")],["Total instructions",g(sass,"total_instructions")]
-          ]:[["Barriers",g(ptx,"barrier")],["Branches",g(ptx,"branches")],["Loops",g(ptx,"loops")]]},
-          {title:"Efficiency", rows:[
-            ["Productive instr. fraction",pct(d.pattern.productive_instruction_fraction)],
-            ["Tensor utilization fraction",pct(d.pattern.tensor_utilization_fraction)],
-            ["Pattern class",d.pattern.class]
-          ]}
+          {title:"Global Memory", rows:hasSass?[["Global loads",g(sass,"global_loads")],["Global stores",g(sass,"global_stores")],["LDG.128",g(sass,"ldg_128")],["LDG.64",g(sass,"ldg_64")],["LDG.32",g(sass,"ldg_32")],["STG.128",g(sass,"stg_128")],["STG.64",g(sass,"stg_64")],["STG.32",g(sass,"stg_32")],["CG loads",g(sass,"cg_loads")],["CS loads",g(sass,"cs_loads")]]:[["Global loads",g(ptx,"global_loads")],["Global stores",g(ptx,"global_stores")]]},
+          {title:"Compute", rows:hasSass?[["Arithmetic ops",g(sass,"arithmetic_ops")],["Integer ops",g(sass,"integer_ops")],["FP16 scalar ops",g(sass,"fp16_arith_ops")],["Tensor ops total",g(sass,"tensor_ops")],["WMMA/HMMA (FP)",g(sass,"wmma_ops")],["SFU ops",g(sass,"sfu_ops")]]:[["FMA",g(ptx,"fma")],["ADD",g(ptx,"add")],["MUL",g(ptx,"mul")]]},
+          {title:"Shared / Local", rows:hasSass?[["Shared loads",g(sass,"shared_loads")],["Shared stores",g(sass,"shared_stores")],["Local loads (spill)",g(sass,"local_loads")],["Local stores (spill)",g(sass,"local_stores")]]:[["(not available from PTX)","—"]]},
+          {title:"Atomics & Warp Primitives", rows:hasSass?[["Atomic ops (total)",g(sass,"atomic_ops")],["Global atomics (ATOM+RED)",g(sass,"global_atomic_ops")],["Warp shuffle (SHFL.*)",g(sass,"warp_shuffle_ops")],["Warp vote (VOTE.*)",g(sass,"warp_vote_ops")]]:[["(not available from PTX)","—"]]},
+          {title:"Control & Sync", rows:hasSass?[["Barriers (BAR.SYNC)",g(sass,"barrier")],["Branches",g(sass,"branch")],["Total instructions",g(sass,"total_instructions")]]:[["Barriers",g(ptx,"barrier")],["Branches",g(ptx,"branches")],["Loops",g(ptx,"loops")]]},
+          {title:"Efficiency", rows:[["Productive instr. fraction",pct(d.pattern.productive_instruction_fraction)],["Tensor utilization fraction",pct(d.pattern.tensor_utilization_fraction)],["Pattern class",d.pattern.class]]}
         ];
         var html="";
         sections.forEach(function(sec){
@@ -811,14 +795,44 @@
         document.getElementById("instmixDetailBody").innerHTML = html;
       }
 
-      // ── Raw Features ──────────────────────────────────────────────────
+      // ── Raw Features  (static) ────────────────────────────────────────
       function renderRaw(d) {
         var ptx=d.ptxFeatures||{}, sass=d.sassFeatures||{};
+        var hasPtxInstrs = Object.keys(ptx).some(function(k){ return k!=="registers" && ptx[k]>0; });
+        var sassOnly = d.hasSass && !hasPtxInstrs;
+        var bothPresent = d.hasSass && hasPtxInstrs;
+        document.getElementById("rawTitle").textContent =
+          sassOnly    ? "SASS Feature Counts" :
+          bothPresent ? "PTX vs SASS Feature Fusion" :
+                        "PTX Feature Counts";
+        document.getElementById("rawColPtx").textContent  = sassOnly ? "Launch Params" : "PTX";
+        document.getElementById("rawColSass").textContent = "SASS";
         var allKeys=Array.from(new Set(Object.keys(ptx).concat(Object.keys(sass)))).sort();
         document.getElementById("rawBody").innerHTML = allKeys.map(function(k){
           var pv=ptx[k]!=null?ptx[k]:"—", sv=sass[k]!=null?sass[k]:"—";
           var diff=(pv!=="—"&&sv!=="—"&&pv!==sv)?" class=\"diff\"":"";
           return "<tr"+diff+"><td>"+esc(k)+"</td><td>"+esc(pv)+"</td><td>"+esc(d.hasSass?sv:"—")+"</td></tr>";
+        }).join("");
+      }
+
+      // ── Capabilities matrix  (arch-dependent via cap for selected row) ─
+      function renderCapabilities(d, selectedCap) {
+        var results = d.capabilityResults || [];
+        var selectedPreset = selectedCap ? selectedCap.preset : (d.capabilityDefaultPreset || "");
+        document.getElementById("capBody").innerHTML = results.map(function(v) {
+          var isSelected = v.preset === selectedPreset;
+          var cls = isSelected ? ' class="diff"' : "";
+          var nativeMark = v.isNative ? " ✓" : "";
+          var label = isSelected ? (v.label + " ◀") : v.label;
+          var bottleneck = BOTTLENECK_LABELS[v.diagnosis.primary_bottleneck] || v.diagnosis.primary_bottleneck;
+          return "<tr"+cls+">" +
+            "<td>"+esc(label)+nativeMark+"</td>" +
+            "<td>"+esc(v.smTag)+"</td>" +
+            "<td>"+esc((Math.round((v.occupancy.occupancy||0)*1000)/10).toFixed(1)+"% ("+v.occupancy.occupancy_class+")")+"</td>" +
+            "<td>"+esc(LIMIT_LABELS[v.occupancy.limiting_factor]||v.occupancy.limiting_factor)+"</td>" +
+            "<td>"+esc(v.occupancy.blocks_per_sm)+"</td>" +
+            "<td>"+esc(bottleneck)+"</td>" +
+          "</tr>";
         }).join("");
       }
 
@@ -828,19 +842,26 @@
         if (!d||!d.gpu) return;
         tabData = d;
         chartsBuilt = {};
+        Object.keys(chartInstances).forEach(function(id){ chartInstances[id].destroy(); delete chartInstances[id]; });
 
         document.getElementById("pageTitle").textContent = "Kernel Analysis: "+(d.kernelName||d.gpu);
         document.getElementById("pageSub").textContent   = d.displayPath+" — "+d.gpu;
 
-        renderOverview(d);
-        renderBottleneck(d);
-        renderStalls(d);
+        populateCapSelect(d);
+        var defaultPreset = d.capabilityDefaultPreset || (d.capabilityResults&&d.capabilityResults[0]&&d.capabilityResults[0].preset) || "";
+        var initCap = (d.capabilityResults||[]).find(function(c){return c.preset===defaultPreset;}) || null;
+        currentCap = initCap;
+        if (initCap) updateCapModeBadge(initCap);
+
+        renderOverview(d, currentCap);
+        renderBottleneck(d, currentCap);
+        renderStalls(d, currentCap);
         renderMemory(d);
         renderPattern(d);
-        renderOccupancy(d);
+        renderOccupancy(d, currentCap);
+        renderCapabilities(d, currentCap);
         renderRaw(d);
-        // Occupancy tab is the default; build its charts immediately
-        buildOccupancySweepCharts(d);
+        buildOccupancySweepCharts(d, currentCap);
         chartsBuilt["occupancy"] = true;
       });
 

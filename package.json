@@ -4,16 +4,18 @@
   "description": "Local PTX/SASS fast analysis inside VS Code (no Python, no network).",
   "version": "0.0.1",
   "publisher": "paxzas",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shathil/PaxZas"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
+  "icon": "icon.png",
   "categories": [
     "Other"
   ],
   "activationEvents": [
-    "onCommand:cudaAnalyzer.run",
-    "onCommand:paxzas.analyzeActiveFile",
-    "onCommand:paxzas.analyzeSelectedFile",
     "onCommand:paxzas.analyzeWithLaunchSpec",
     "onCommand:paxzas.kernelDiagnosis"
   ],
@@ -25,23 +27,10 @@
     "check": "npm run compile",
     "test": "vitest run",
     "test:watch": "vitest",
-    "vsix": "npm install && npm run compile && npx --yes @vscode/vsce package --allow-missing-repository --skip-license"
+    "vsix": "npm install && npm run compile && npx --yes @vscode/vsce package"
   },
   "contributes": {
     "commands": [
-      {
-        "command": "cudaAnalyzer.run",
-        "title": "Run CUDA Kernel Analysis",
-        "icon": "$(play)"
-      },
-      {
-        "command": "paxzas.analyzeActiveFile",
-        "title": "Paxzas: Analyze Active CUDA File"
-      },
-      {
-        "command": "paxzas.analyzeSelectedFile",
-        "title": "Paxzas: Analyze Selected CUDA File"
-      },
       {
         "command": "paxzas.analyzeWithLaunchSpec",
         "title": "Paxzas: Analyze CUDA File with Launch Spec"
@@ -55,17 +44,7 @@
     "menus": {
       "explorer/context": [
         {
-          "command": "paxzas.analyzeSelectedFile",
-          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
-          "group": "navigation"
-        },
-        {
           "command": "paxzas.analyzeWithLaunchSpec",
-          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
-          "group": "navigation"
-        },
-        {
-          "command": "cudaAnalyzer.run",
           "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
           "group": "navigation"
         },
@@ -77,17 +56,7 @@
       ],
       "editor/context": [
         {
-          "command": "paxzas.analyzeActiveFile",
-          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
-          "group": "navigation"
-        },
-        {
           "command": "paxzas.analyzeWithLaunchSpec",
-          "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
-          "group": "navigation"
-        },
-        {
-          "command": "cudaAnalyzer.run",
           "when": "resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass",
           "group": "navigation"
         },
@@ -98,11 +67,6 @@
         }
       ],
       "editor/title": [
-        {
-          "command": "cudaAnalyzer.run",
-          "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass || resourceExtname == .s",
-          "group": "navigation"
-        },
         {
           "command": "paxzas.analyzeWithLaunchSpec",
           "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass || resourceExtname == .s",
@@ -115,10 +79,6 @@
         }
       ],
       "commandPalette": [
-        {
-          "command": "cudaAnalyzer.run",
-          "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass"
-        },
         {
           "command": "paxzas.kernelDiagnosis",
           "when": "editorLangId == cuda || resourceExtname == .ptx || resourceExtname == .cu || resourceExtname == .sass"
@@ -135,9 +95,15 @@
             "auto",
             "ampere-like-default",
             "a100",
-            "rtx-4090"
+            "rtx-4090",
+            "h100-sxm",
+            "h100-pcie",
+            "h200",
+            "b200",
+            "gb200",
+            "blackwell-consumer-default"
           ],
-          "description": "GPU specs for occupancy heuristics. \"auto\" uses nvidia-smi when available, otherwise Ampere-like defaults."
+          "description": "GPU specs for occupancy heuristics and capability what-if views. \"auto\" uses nvidia-smi when available; named presets force architecture/device assumptions."
         }
       }
     }

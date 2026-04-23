@@ -4,9 +4,13 @@ import {
   findCudaArtifactUris,
   findSupplementalSassForPtx,
 } from "./cuda_artifacts";
-import { resolveGpuSpecForAnalysis } from "./analyzer/gpu_spec";
+import {
+  allPresetMetadata,
+  presetForSmVersion,
+  resolveGpuSpecForAnalysis,
+} from "./analyzer/gpu_spec";
 import { mergeLaunchWithHints } from "./analyzer/merge_launch";
-import { extractSassFeatures } from "./analyzer/sass_features";
+import { detectSassSmTargets, extractSassFeatures } from "./analyzer/sass_features";
 import { sweepBlockSizes, buildSignals, type KernelInsights } from "./analyzer/occupancy_sweep";
 import { showKernelDiagnosisPanel, buildDiagnosisPayload } from "./webview/diagnosisPanel";
 
@@ -60,6 +64,10 @@ function gpuPresetFromSettings(): string {
   );
 }
 
+function looksLikeSassDump(text: string): boolean {
+  return /^\s*Function\s*:/m.test(text);
+}
+
 function formatSummary(r: AnalyzerReport, meta?: { path?: string; ms?: number }): string {
   const head: string[] = [];
   if (meta?.path) {
@@ -82,6 +90,15 @@ function formatSummary(r: AnalyzerReport, meta?: { path?: string; ms?: number })
   if (r.sass_note) {
     lines.push(r.sass_note);
     lines.push("");
+  }
+  if (r.analysis_mode) {
+    lines.push(`Analysis mode: ${r.analysis_mode}`);
+  }
+  if (r.analysis_mode_note) {
+    lines.push(r.analysis_mode_note);
+  }
+  if (r.sass_detected_targets?.length) {
+    lines.push(`Detected SASS targets: ${r.sass_detected_targets.join(", ")}`);
   }
   lines.push(`PTX kernel (launch/occupancy): ${r.ptx_kernel ?? "(none)"}`);
   if (r.ptx_kernels_analyzed !== undefined && r.ptx_kernels_analyzed > 0) {
@@ -395,6 +412,80 @@ async function resolveSourceText(
   return { text: await readFileText(picked), sourceUri: picked };
 }
 
+/** Extract occupancy/diagnosis/sweep from a per-preset report into the payload shape. */
+function capabilityResultFromReport(
+  meta: { key: string; label: string; smTag: string },
+  report: AnalyzerReport,
+  detectedTargetSet: Set<string>,
+  shared: number,
+  registers: number,
+  currentBlockSize: number | undefined,
+  specForPreset: import("./analyzer/gpu_spec").GpuSpec
+): NonNullable<import("./webview/diagnosisPanel").DiagnosisPayload["capabilityResults"]>[number] | undefined {
+  if (report.error || !report.memory || !report.pattern) return undefined;
+  const occ = report.kernel;
+  const occModel = report.occupancy_model;
+  const diag = report.diagnosis;
+  const sweep = sweepBlockSizes(shared, registers, specForPreset, currentBlockSize, undefined);
+  return {
+    preset: meta.key,
+    label: meta.label,
+    smTag: meta.smTag,
+    isNative: detectedTargetSet.has(meta.smTag),
+    analysisMode: report.analysis_mode ?? "preset-only-what-if",
+    gpu: specForPreset.name,
+    gpuSpec: {
+      smMaxThreads: specForPreset.smMaxThreads,
+      smMaxWarps: specForPreset.smMaxWarps,
+      smMaxRegisters: specForPreset.smMaxRegisters,
+      smMaxSharedMem: specForPreset.smMaxSharedMem,
+      smMaxBlocks: specForPreset.smMaxBlocks,
+      smCount: specForPreset.smCount,
+      warpSize: specForPreset.warpSize,
+    },
+    occupancy: {
+      class: occModel?.class ?? "unknown",
+      confidence: occModel?.confidence ?? 0,
+      occupancy: (occ?.occupancy as number) ?? 0,
+      limiting_factor: occModel?.limiting_factor ?? "unknown",
+      blocks_per_sm: occ?.blocks_per_sm ?? 0,
+      threads_per_block: occModel?.threads_per_block ?? 0,
+      shared_mem_per_block: occModel?.shared_mem_per_block ?? 0,
+      registers_per_thread: occModel?.registers_per_thread ?? 0,
+      occupancy_class: occ?.occupancy_class ?? "unknown",
+      register_pressure_margin: occ?.register_pressure_margin,
+      next_occupancy_class: occ?.next_occupancy_class,
+      estimated_sm_utilization: occ?.estimated_sm_utilization,
+      warnings: occ?.warnings ?? [],
+      limits: occ?.limits ?? {},
+      waste_metrics: (occ?.waste_metrics as Record<string, number>) ?? {},
+      sources: occModel?.sources ?? { threads: "unknown", shared: "unknown", registers: "unknown" },
+    },
+    diagnosis: {
+      primary_bottleneck: diag?.primary_bottleneck ?? "none_detected",
+      secondary_bottlenecks: diag?.secondary_bottlenecks ?? [],
+      stall_profile: {
+        memory_dependency: diag?.stall_profile.memory_dependency ?? false,
+        memory_throttle: diag?.stall_profile.memory_throttle ?? false,
+        local_memory: diag?.stall_profile.local_memory ?? false,
+        sync: diag?.stall_profile.sync ?? false,
+      },
+      optimization_priority: diag?.optimization_priority ?? [],
+      confidence: diag?.confidence ?? 0,
+    },
+    confidences: {
+      occupancy: occModel?.confidence ?? 0,
+      diagnosis: diag?.confidence ?? 0,
+    },
+    sweep: {
+      registersPerThread: registers,
+      sharedMemPerBlock: shared,
+      currentBlockSize,
+      points: sweep.points,
+    },
+  };
+}
+
 async function runKernelDiagnosisCommand(
   context: vscode.ExtensionContext,
   uri?: vscode.Uri
@@ -405,28 +496,38 @@ async function runKernelDiagnosisCommand(
     { location: vscode.ProgressLocation.Notification, title: "Kernel Analysis", cancellable: false },
     async () => {
       await new Promise<void>((r) => setImmediate(r));
-      const gpuPreset = gpuPresetFromSettings();
-      const { spec } = await resolveGpuSpecForAnalysis(gpuPreset, {
-        ptxText: src.text,
-        enableLocalCudaDetect: true,
-      });
+
+      // ── 1. Detect SASS targets ──────────────────────────────────────────
       const sassText = await supplementalSassForPtx(src.sourceUri);
-      const report = await analyze(src.text, {}, undefined, sassText, gpuPreset);
-      if (report.error) {
-        void vscode.window.showErrorMessage(`Kernel Analysis failed: ${report.error}`);
-        return;
+      const embeddedSass = looksLikeSassDump(src.text) ? src.text : undefined;
+      const effectiveSassText = sassText ?? embeddedSass;
+      const detectedSmTargets = effectiveSassText ? detectSassSmTargets(effectiveSassText) : [];
+      const detectedTargetTags = detectedSmTargets.map((sm) => `sm_${sm}`);
+      const detectedTargetSet = new Set(detectedTargetTags);
+
+      // ── 2. Determine default capability: first native target, else settings ──
+      const settingsPreset = gpuPresetFromSettings();
+      let defaultPreset = settingsPreset;
+      if (settingsPreset === "auto" || !allPresetMetadata().find((p) => p.key === settingsPreset)) {
+        const firstNative = detectedSmTargets.map((sm) => presetForSmVersion(sm)).find((p) => p != null);
+        if (firstNative) defaultPreset = firstNative.key;
+        else defaultPreset = "a100";
       }
+
+      // ── 3. SASS features (shared across all presets) ───────────────────
+      // Use the sidecar file first; fall back to the file itself if it is a SASS dump opened directly.
+      const sassSource = sassText ?? embeddedSass;
       let sassFlatFeatures: Record<string, number> | undefined;
       let sassRegisters: number | undefined;
-      if (sassText) {
-        const [, sassInstr] = extractSassFeatures(sassText, undefined);
+      if (sassSource) {
+        const [, sassInstr] = extractSassFeatures(sassSource, undefined);
         sassFlatFeatures = flattenSassFeatures(sassInstr);
         if (sassInstr.max_register_index >= 0) {
           sassRegisters = sassInstr.max_register_index + 1;
         }
       }
 
-      // Compute occupancy sweep (same logic as the old standalone sweep command)
+      // ── 4. Kernel launch params (shared across all presets) ───────────
       let registers = 32;
       let shared = 0;
       let currentBlockSize: number | undefined;
@@ -438,9 +539,30 @@ async function runKernelDiagnosisCommand(
       } catch {
         if (sassRegisters != null) registers = sassRegisters;
       }
-      // Build KernelInsights for sweep (populates per-point limit colors etc.)
+
+      // ── 5. Run analysis for ALL presets in parallel ────────────────────
+      const allMeta = allPresetMetadata();
+      const [allReports, allSpecs] = await Promise.all([
+        Promise.all(allMeta.map((meta) => analyze(src.text, {}, undefined, sassText, meta.key))),
+        Promise.all(allMeta.map((meta) =>
+          resolveGpuSpecForAnalysis(meta.key, { ptxText: src.text, enableLocalCudaDetect: false })
+            .then((r) => r.spec)
+        )),
+      ]);
+
+      // ── 6. Primary report (for top-level payload) ───────────────────────
+      const defaultIdx = allMeta.findIndex((m) => m.key === defaultPreset);
+      const primaryIdx = defaultIdx >= 0 ? defaultIdx : 0;
+      const report = allReports[primaryIdx]!;
+      const spec = allSpecs[primaryIdx]!;
+      if (report.error) {
+        void vscode.window.showErrorMessage(`Kernel Analysis failed: ${report.error}`);
+        return;
+      }
+
+      // ── 7. Build sweepInsights for primary (pattern/memory are instruction-driven) ──
       let sweepInsights: KernelInsights | undefined;
-      if (!report.error && report.memory && report.pattern) {
+      if (report.memory && report.pattern) {
         const signals = buildSignals(report.pattern, report.memory);
         sweepInsights = {
           memoryClass: report.memory.class,
@@ -485,19 +607,24 @@ async function runKernelDiagnosisCommand(
           ptxOnly: !sassText,
         };
       }
-      const sweepResult = sweepBlockSizes(shared, registers, spec, currentBlockSize, sweepInsights);
+      const primarySweep = sweepBlockSizes(shared, registers, spec, currentBlockSize, sweepInsights);
 
+      // ── 8. Build capabilityResults for all presets ─────────────────────
+      const capabilityResults = allMeta
+        .map((meta, i) => capabilityResultFromReport(
+          meta, allReports[i]!, detectedTargetSet, shared, registers, currentBlockSize, allSpecs[i]!
+        ))
+        .filter((r): r is NonNullable<typeof r> => r != null);
+
+      // ── 9. Build and show payload ───────────────────────────────────────
       const payload = buildDiagnosisPayload(
         src.sourceUri.fsPath,
         report,
         spec,
         sassFlatFeatures,
-        {
-          registersPerThread: registers,
-          sharedMemPerBlock: shared,
-          currentBlockSize,
-          points: sweepResult.points,
-        }
+        { registersPerThread: registers, sharedMemPerBlock: shared, currentBlockSize, points: primarySweep.points },
+        capabilityResults,
+        defaultPreset
       );
       if (!payload) {
         void vscode.window.showWarningMessage("Kernel Analysis: insufficient data from analysis.");

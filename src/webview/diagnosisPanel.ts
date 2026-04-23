@@ -121,6 +121,23 @@ export interface DiagnosisPayload {
       blocksByBlockLimit: number;
     }>;
   } | undefined;
+  /** Full per-capability results. One entry per preset. The webview uses this to
+   *  populate the capability selector and switch all arch-dependent tabs. */
+  capabilityResults?: Array<{
+    preset: string;
+    label: string;
+    smTag: string;
+    isNative: boolean;
+    analysisMode: string;
+    gpu: string;
+    gpuSpec: DiagnosisPayload["gpuSpec"];
+    occupancy: DiagnosisPayload["occupancy"];
+    diagnosis: DiagnosisPayload["diagnosis"];
+    confidences: { occupancy: number; diagnosis: number };
+    sweep: DiagnosisPayload["sweep"];
+  }>;
+  /** Preset key that should be selected by default in the capability dropdown. */
+  capabilityDefaultPreset?: string;
 }
 
 export function buildDiagnosisPayload(
@@ -128,7 +145,9 @@ export function buildDiagnosisPayload(
   report: AnalyzerReport,
   spec: GpuSpec,
   sassFeatures: Record<string, number> | undefined,
-  sweep?: DiagnosisPayload["sweep"]
+  sweep?: DiagnosisPayload["sweep"],
+  capabilityResults?: DiagnosisPayload["capabilityResults"],
+  capabilityDefaultPreset?: string
 ): DiagnosisPayload | undefined {
   if (report.error || !report.memory || !report.pattern) {
     return undefined;
@@ -251,6 +270,8 @@ export function buildDiagnosisPayload(
     sassFeatures,
     hasSass: sassFeatures != null,
     sweep,
+    capabilityResults,
+    capabilityDefaultPreset,
   };
 }
 

@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  detectSassSmTargets,
   extractSassFeatures,
   inferRegistersPerThreadFromSass,
 } from "../src/analyzer/sass_features";
@@ -43,6 +44,19 @@ describe("sass_features (Python parity shape)", () => {
     const regs = inferRegistersPerThreadFromSass(text, KERNEL);
     expect(regs).toBeDefined();
     expect(regs!).toBeGreaterThanOrEqual(1);
+  });
+
+  it("detects multiple architecture targets in fatbin-style SASS text", () => {
+    const text = [
+      "Fatbin elf code:",
+      "code for sm_80",
+      "Function : _Ztest80",
+      "code for sm_90",
+      "Function : _Ztest90",
+      "arch = sm_90",
+      "arch = sm_120",
+    ].join("\n");
+    expect(detectSassSmTargets(text)).toEqual([80, 90, 120]);
   });
 });
 

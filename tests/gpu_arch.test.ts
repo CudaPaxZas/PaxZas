@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  allPresetMetadata,
   ccKeyFromPtxTarget,
   computeCapToArchKey,
   DEFAULT_FALLBACK_CC,
+  getPresetMetadata,
   gpuSpecFromArch,
   GPU_SM_CONFIGS,
   parsePtxSmTargetVersion,
+  presetForSmVersion,
 } from "../src/analyzer/gpu_spec";
 
 describe("PTX .target → compute capability", () => {
@@ -48,5 +51,20 @@ describe("gpuSpecFromArch", () => {
 
   it("exposes Blackwell CC 10.0 row", () => {
     expect(GPU_SM_CONFIGS["10.0"].name).toBe("blackwell-sm100");
+  });
+
+  it("includes Hopper and Blackwell presets", () => {
+    const keys = allPresetMetadata().map((p) => p.key);
+    expect(keys).toContain("h100-sxm");
+    expect(keys).toContain("h200");
+    expect(keys).toContain("b200");
+    expect(keys).toContain("blackwell-consumer-default");
+  });
+
+  it("maps common SM targets to preset metadata", () => {
+    expect(presetForSmVersion(90)?.key).toBe("h100-sxm");
+    expect(presetForSmVersion(100)?.key).toBe("b200");
+    expect(presetForSmVersion(120)?.key).toBe("blackwell-consumer-default");
+    expect(getPresetMetadata("h200").cc).toBe("9.0");
   });
 });
