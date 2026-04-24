@@ -6,7 +6,7 @@
   "publisher": "paxzas",
   "repository": {
     "type": "git",
-    "url": "https://github.com/shathil/PaxZas"
+    "url": "https://github.com/CudaPaxZas/PaxZas"
   },
   "engines": {
     "vscode": "^1.85.0"
