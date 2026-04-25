@@ -13,8 +13,12 @@ export interface PtxKernelHints {
 const ENTRY_RE = /\.(?:visible\s+)?entry\s+(\S+)\s*\(/g;
 const MAXNREG_RE = /\.maxnreg\s+(\d+)/;
 const MAXNTID_RE = /\.maxntid\s+(\d+)(?:\s*,\s*(\d+)(?:\s*,\s*(\d+))?)?/;
+// Group 1: bit-width (8/16/32/64) from the type qualifier — may be absent.
+// Group 2: element count in brackets.
+// When no type qualifier is present the declaration is treated as raw bytes
+// (width = 8 bits = 1 byte), which matches how nvcc emits un-typed .shared regions.
 const SHARED_ARRAY_RE =
-  /\.shared(?:\s+\.align\s+\d+)?(?:\s+\.(?:b|s|u|f)(?:8|16|32|64))?\s+\S+\s*\[\s*(\d+)\s*\]/g;
+  /\.shared(?:\s+\.align\s+\d+)?(?:\s+\.(?:b|s|u|f)(8|16|32|64))?\s+\S+\s*\[\s*(\d+)\s*\]/g;
 const DYNAMIC_SHARED_RE =
   /(?:\.extern\s+\.shared\b|\.shared(?:\s+\.align\s+\d+)?(?:\s+\.(?:b|s|u|f)(?:8|16|32|64))?\s+\S+\s*\[\s*\])/;
 
@@ -81,7 +85,13 @@ function estimateStaticSharedBytes(ptxSnippet: string): number {
   SHARED_ARRAY_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = SHARED_ARRAY_RE.exec(ptxSnippet)) !== null) {
-    total += parseInt(m[1]!, 10);
+    // m[1] = bit-width string ("8", "16", "32", "64") or undefined when absent.
+    // Absent type → treat as raw bytes (1 byte per element), matching how nvcc
+    // emits un-typed or .b8 shared regions.
+    const bits = m[1] !== undefined ? parseInt(m[1], 10) : 8;
+    const byteWidth = bits / 8;
+    const count = parseInt(m[2]!, 10);
+    total += count * byteWidth;
   }
   return total;
 }

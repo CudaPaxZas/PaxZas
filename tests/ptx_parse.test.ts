@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   maxThreadsFromMaxntid,
   parsePtxKernelHints,
+  listPtxEntryNames,
 } from "../src/analyzer/ptx_parse";
 
 const SAMPLE_PTX = `
@@ -52,5 +53,39 @@ describe("ptx_parse (Python parity)", () => {
     expect(h.kernelName).toBe("_Z10dynsharedv");
     expect(h.staticSharedBytes).toBe(0);
     expect(h.dynamicSharedDetected).toBe(true);
+  });
+
+  // B2 regression: element count must be multiplied by the element byte-width.
+  // Before the fix, all declarations were treated as raw bytes regardless of type,
+  // so `.u32 buf[256]` wrongly reported 256 bytes instead of 1024.
+  it("B2 – typed shared arrays use element size (u32×256 = 1024 bytes)", () => {
+    const ptx = `
+.version 8.0
+.target sm_80
+.visible .entry _Z6kernel(
+.param .u64 p
+)
+{
+.shared .align 4 .u32  tile[256];
+.shared .align 8 .f64  dbuf[64];
+.shared .align 2 .b16  hbuf[512];
+.shared .align 4 .b8   raw[128];
+ret;
+}
+`;
+    const h = parsePtxKernelHints(ptx, undefined);
+    // tile:  256 × 4 = 1024
+    // dbuf:   64 × 8 =  512
+    // hbuf:  512 × 2 = 1024
+    // raw:   128 × 1 =  128
+    // total: 2688 bytes
+    expect(h.staticSharedBytes).toBe(2688);
+  });
+
+  it("B2 – .b8 (raw byte) declarations are counted as 1 byte per element", () => {
+    // The existing test fixture already exercises this path (.b8 smem[1024])
+    // but this makes the expectation explicit.
+    const h = parsePtxKernelHints(SAMPLE_PTX, undefined);
+    expect(h.staticSharedBytes).toBe(1024); // 1024 × 1 byte
   });
 });

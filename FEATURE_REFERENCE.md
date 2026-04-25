@@ -214,7 +214,7 @@ consumes it.
 | `flops_proxy` | `scalar×2 + wmma×512 + intMMA×64 + sfu×4` | `fma×2 + add + mul` | Memory |
 | `registers_per_thread` | `sass.max_register_index + 1` | `ptx.maxnreg` hint or launch param | Occupancy |
 | `threads_per_block` | — | `ptx.maxntid` hint or launch param | Occupancy |
-| `shared_mem_per_block` | — | `ptx.static_shared` (bytes) or launch param | Occupancy |
+| `shared_mem_per_block` | — | `ptx.static_shared` (bytes, typed element size applied) or launch param | Occupancy |
 | `cache_policy` | `sass.cg_loads > 0 → "L2"; sass.cs_loads > 0 → "streaming"` | `null` | Memory |
 | `tensor_ops` | `sass.tensor_ops` | 0 | Pattern |
 | `integer_ops` | `sass.integer_ops` | 0 | Pattern (`fp_to_int_ratio`) |
@@ -321,7 +321,7 @@ priority waterfall:
 |-----------|---------------------|-----------|-----------|
 | `registers_per_thread` | Explicit `--launch regs=` | `ptx.maxnreg` hint | `sass.max_register_index + 1` |
 | `threads_per_block` | Explicit `--launch threads=` | `ptx.maxntid` hint | — (required) |
-| `shared_mem_per_block` | Explicit `--launch shared=` | `ptx.static_shared` bytes | 0 |
+| `shared_mem_per_block` | Explicit `--launch shared=` | `ptx.static_shared` bytes (element count × byte-width of declared type) | 0 |
 
 Source labels (`"launch"`, `"ptx.maxntid"`, `"ptx.maxnreg"`, `"ptx.static_shared"`,
 `"sass.inferred"`) are carried forward into `OccupancyModelResult.sources` for
