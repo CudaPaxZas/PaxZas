@@ -415,6 +415,15 @@ export interface KernelAnalysis extends Record<string, unknown> {
    * Values: "medium" | "high".  Undefined when `register_pressure_margin` is undefined.
    */
   next_occupancy_class: string | undefined;
+  /**
+   * B7: When the limiting factor switches after the register reduction (e.g. to
+   * "shared_mem"), this field names the new bottleneck.  The register-reduction
+   * advice is still valid — the tier improvement is real — but the user should
+   * also address this resource to improve occupancy further.
+   * Undefined when the limiting factor stays "registers" after reduction, or
+   * when `register_pressure_margin` is undefined.
+   */
+  next_limiting_factor: LimitName | undefined;
   limiting_factor: LimitName;
   blocks_per_sm: number;
   limits: Record<string, number>;
@@ -471,7 +480,7 @@ export function findRegisterPressureMargin(
   sharedMemPerBlock: number,
   registersPerThread: number,
   spec: GpuSpec = AMPERE_LIKE_DEFAULT
-): { margin: number; nextClass: string } | undefined {
+): { margin: number; nextClass: string; limitingSwitchesTo: LimitName | undefined } | undefined {
   const current = computeOccupancyBreakdown(
     threadsPerBlock,
     sharedMemPerBlock,
@@ -512,7 +521,25 @@ export function findRegisterPressureMargin(
   if (best === undefined || bestClass === undefined) {
     return undefined;
   }
-  return { margin: registersPerThread - best, nextClass: bestClass };
+
+  // B7: verify the trial breakdown at `best` to detect a limiting-factor switch.
+  // The tier improvement is genuine and the margin advice is still valid — the
+  // user CAN reduce registers by `margin` to reach `nextClass`.  However, if the
+  // new limiting factor is no longer "registers" (e.g. shared_mem takes over),
+  // the caller should surface this so the user knows the NEXT bottleneck to
+  // address after the register reduction.
+  const trialAtBest = computeOccupancyBreakdown(
+    threadsPerBlock,
+    sharedMemPerBlock,
+    best,
+    spec
+  );
+  const limitingSwitchesTo: LimitName | undefined =
+    trialAtBest.limiting_factor !== "registers"
+      ? trialAtBest.limiting_factor
+      : undefined;
+
+  return { margin: registersPerThread - best, nextClass: bestClass, limitingSwitchesTo };
 }
 
 export function analyzeKernel(
@@ -593,6 +620,7 @@ export function analyzeKernel(
     occupancy_class: classifyOccupancy(warpOccupancy),
     register_pressure_margin: registerMargin?.margin,
     next_occupancy_class: registerMargin?.nextClass,
+    next_limiting_factor: registerMargin?.limitingSwitchesTo,
     limiting_factor: bd.limiting_factor,
     blocks_per_sm: bd.blocks_per_sm,
     limits: {

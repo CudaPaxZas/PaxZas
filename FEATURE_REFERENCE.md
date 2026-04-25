@@ -372,6 +372,8 @@ occupancy           = active_warps_per_sm / smMaxWarps   [0.0 – 1.0]
 
 `register_pressure_margin` is only populated when `limiting_factor = "registers"` and a higher occupancy tier exists; it reports regs/thread to shed to reach `next_occupancy_class`.
 
+`next_limiting_factor` is set alongside `register_pressure_margin` when shedding the margin regs causes a **different resource to become the new bottleneck** (e.g. `"shared_mem"`).  The tier improvement is still achievable — the register-reduction advice remains valid — but the field signals that a second optimisation will be needed to improve occupancy further.
+
 **`OccupancyModelResult` fields:** `class` (same tier string), `confidence` (0.65–0.85), `limiting_factor`, `blocks_per_sm`, `threads_per_block`, `shared_mem_per_block`, `registers_per_thread`, `sources` (origin of each parameter), `insight`.
 
 ### Step 4 — Actionable warnings (in `KernelAnalysis.warnings[]`)
