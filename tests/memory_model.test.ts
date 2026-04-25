@@ -391,4 +391,54 @@ describe("memory_model — gap fixes", () => {
     // Kernel should be memory-bound (loads + stores with zero compute)
     expect(out.class).toBe("memory_bound");
   });
+
+  // ── B6: confidence override for globalMemOps = 0 must respect SASS presence ─
+  //
+  // Old code: `confidence = 0.30` unconditionally when globalMemOps === 0.
+  // This discarded the +0.25 SASS bonus, so a SASS-verified pure-compute kernel
+  // received the same low score as a PTX-only guess.
+  //
+  // New rule:
+  //   - SASS present & zero global ops → SASS confirmed it → high confidence kept
+  //   - SASS absent  & zero global ops → PTX zero is unreliable  → 0.30 override
+
+  it("B6 – SASS-confirmed zero globalOps keeps high confidence (≥ 0.80)", () => {
+    // Build a pure-compute SASS kernel: only FFMA, no LDG/STG at all.
+    let a = 0xb000;
+    const lines: string[] = ["Function : _Z6pureCoK", ""];
+    for (let i = 0; i < 64; i++) {
+      lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`);
+      a += 0x10;
+    }
+    const sass = featuresFromSass(lines.join("\n"), "_Z6pureCoK");
+    const ptxEmpty = featuresFromPtx(
+      PTX_HEAD + `\n.visible .entry _Z6pureCoK(.param .u64 p)\n{\n  ret;\n}\n`,
+      "_Z6pureCoK"
+    );
+
+    const out = analyzeMemory(ptxEmpty, sass);
+    expect(out.global_mem_ops).toBe(0);
+    expect(out.class).toBe("compute_friendly");
+    // SASS confirmed zero global ops → confidence must be high, not 0.30
+    expect(out.confidence).toBeGreaterThanOrEqual(0.80);
+  });
+
+  it("B6 – PTX-only zero globalOps keeps low confidence (≤ 0.35)", () => {
+    // PTX with no global loads or stores — PTX zero is unreliable.
+    const ptxNoMem =
+      PTX_HEAD +
+      `
+.visible .entry _Z8noMemPtxK(.param .u64 p)
+{
+  .reg .f32 %f<4>;
+  fma.rn.f32 %f0, %f1, %f2, %f3;
+  fma.rn.f32 %f0, %f1, %f2, %f3;
+  ret;
+}
+`;
+    const out = analyzeMemory(featuresFromPtx(ptxNoMem, "_Z8noMemPtxK"));
+    expect(out.global_mem_ops).toBe(0);
+    // PTX-only zero → hard to classify → confidence should stay ≤ 0.35
+    expect(out.confidence).toBeLessThanOrEqual(0.35);
+  });
 });

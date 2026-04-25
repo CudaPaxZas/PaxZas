@@ -312,7 +312,8 @@ flops_proxy = scalar_flops + tensor_fp_flops + tensor_int_flops + sfu_flops
 |-----------|--------|
 | Base | `+0.60` |
 | SASS available | `+0.25` |
-| `global_mem_ops = 0` | **hard override** to `0.30` (this replaces previously accumulated bonuses/penalties) |
+| `global_mem_ops = 0` AND SASS absent | **hard override** to `0.30` — PTX zero is unreliable; hard to classify |
+| `global_mem_ops = 0` AND SASS present | no override — SASS confirmed zero; high confidence kept |
 | `reuse_ratio > 2.0` OR `intensity < 0.5` | `+0.10` |
 | `isStreaming` | `+0.10` (unambiguous signal) |
 | `global_mem_ops < 5` (SASS present) | `−0.10` |
@@ -541,7 +542,7 @@ Confidence reflects data-source quality.  Higher = more trustworthy classificati
 
 | Model | Base | SASS bonus | Strong-signal bonus | Penalty / override conditions |
 |-------|------|-----------|--------------------|-------------------------------|
-| Memory | 0.60 | +0.25 | +0.10 (low intensity or reuse), +0.10 (LD.CS present) | `globalMemOps=0` → **final 0.30 override**; `<5 ops` → −0.10/−0.20 |
+| Memory | 0.60 | +0.25 | +0.10 (low intensity or reuse), +0.10 (LD.CS present) | `globalMemOps=0 & SASS absent` → 0.30 override; `globalMemOps=0 & SASS present` → no override; `<5 ops` → −0.10/−0.20 |
 | Pattern | 0.55 | +0.10 | — | — |
 | Occupancy | 0.65 | — | +0.10 **per launch-sourced field** (`threads`, `shared`, `registers`); +0.05 (`ptx.maxnreg`) | Cap at 0.85 |
 

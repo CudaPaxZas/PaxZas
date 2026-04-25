@@ -306,8 +306,25 @@ export function analyzeMemory(
     confidence += 0.25;
   }
   if (globalMemOps === 0) {
-    // Pure compute kernel = harder to classify, lower confidence
-    confidence = 0.3;
+    // B6 fix: differentiate between "SASS confirmed zero" and "PTX reported zero".
+    //
+    // Old code: `confidence = 0.30` unconditionally.
+    // Problem: this discarded the +0.25 SASS bonus accumulated above, so a SASS-
+    // verified pure-compute kernel (arithmetic_ops > 0, zero global ops) received
+    // the same low 0.30 score as a PTX-only guess.  SASS confirming zero global
+    // ops is actually a strong, trustworthy signal — the hardware assembly has no
+    // LDG/STG instructions.  The `compute_friendly` classification that follows is
+    // more reliable when backed by SASS than any other data-source combination.
+    //
+    // New rule:
+    //   - SASS present → zero is confirmed → keep accumulated score (≥ 0.85 with
+    //     base + SASS bonus), cap at 0.99 as usual.
+    //   - SASS absent  → PTX zero is unreliable (PTX may miss global ops that the
+    //     compiler lowered to SASS LDG/STG) → override to 0.30.
+    if (sassFeatures === undefined) {
+      confidence = 0.3;
+    }
+    // When SASS is present, fall through — confidence already reflects SASS quality.
   } else {
     // Strong signals (clear reuse or clear memory-bound behavior) add 0.1
     if (
