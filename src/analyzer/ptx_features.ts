@@ -34,8 +34,10 @@ function emptyPtxFeatures(): PtxInstructionFeatures {
 const LD_GLOBAL = /\bld\.global\b/g;
 const ST_GLOBAL = /\bst\.global\b/g;
 const FMA = /\bfma\./g;
-const ADD = /\badd\./g;
-const MUL = /\bmul\./g;
+// Negative lookbehind prevents matching sub-opcodes in compound PTX instructions
+// such as `red.add.s32` or `atom.add.f32`, which would inflate the FLOP count.
+const ADD = /(?<![A-Za-z0-9_.])add\./g;
+const MUL = /(?<![A-Za-z0-9_.])mul\./g;
 const BARRIER = /\bbar\.sync\b/g;
 const REG_LINE = /^\s*\.reg\b/;
 const BRA_OPCODE = /\bbra(?:\.[A-Za-z0-9_]+)*\b/g;

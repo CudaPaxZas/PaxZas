@@ -44,4 +44,32 @@ describe("ptx_features (Python parity)", () => {
     expect(f.reg_decl_lines).toBeGreaterThanOrEqual(2);
     expect(flopsHeuristic(f)).toBeGreaterThanOrEqual(4.0);
   });
+
+  it("B1 – compound opcodes (red.add / atom.add / shfl.sync) must not inflate add/mul", () => {
+    // A PTX body that contains compound opcodes which embed "add." or "mul."
+    // as a sub-component.  Only the true scalar instructions should be counted.
+    const body = `
+      .reg .u32 %r<4>;
+      .reg .f32 %f<4>;
+      .reg .u64 %rd<4>;
+
+      // These must NOT be counted as add/mul:
+      red.add.s32   [%rd0], 1;
+      red.add.f32   [%rd0], %f1;
+      atom.add.s64  %r0, [%rd1], 1;
+      atom.add.f32  %f2, [%rd1], %f1;
+      shfl.sync.idx.b32 %r1, %r2, 0, 0x1f, %p0;
+
+      // These MUST be counted:
+      add.f32  %f3, %f1, %f2;
+      add.s32  %r3, %r1, %r2;
+      mul.f32  %f3, %f1, %f2;
+      mul.wide.u32 %rd1, %r1, %r2;
+    `;
+    const f = extractInstructionFeatures(body);
+    // Exactly 2 stand-alone add instructions
+    expect(f.add).toBe(2);
+    // Exactly 2 stand-alone mul instructions
+    expect(f.mul).toBe(2);
+  });
 });
