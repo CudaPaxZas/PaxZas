@@ -426,6 +426,8 @@ function capabilityResultFromReport(
   const occ = report.kernel;
   const occModel = report.occupancy_model;
   const diag = report.diagnosis;
+  // Sweep is recomputed per preset because occupancy curves depend on SM limits
+  // (threads/registers/shared/block limits), not just instruction features.
   const sweep = sweepBlockSizes(shared, registers, specForPreset, currentBlockSize, undefined);
   return {
     preset: meta.key,
@@ -543,7 +545,9 @@ async function runKernelDiagnosisCommand(
       // ── 5. Run analysis for ALL presets in parallel ────────────────────
       const allMeta = allPresetMetadata();
       const [allReports, allSpecs] = await Promise.all([
+        // Instruction-level analysis for every preset.
         Promise.all(allMeta.map((meta) => analyze(src.text, {}, undefined, sassText, meta.key))),
+        // Resolve each preset's concrete SM limits used by occupancy/sweep.
         Promise.all(allMeta.map((meta) =>
           resolveGpuSpecForAnalysis(meta.key, { ptxText: src.text, enableLocalCudaDetect: false })
             .then((r) => r.spec)
@@ -615,6 +619,7 @@ async function runKernelDiagnosisCommand(
           meta, allReports[i]!, detectedTargetSet, shared, registers, currentBlockSize, allSpecs[i]!
         ))
         .filter((r): r is NonNullable<typeof r> => r != null);
+      // Keep a fixed preset list in UI order. Native-vs-what-if is encoded per row.
 
       // ── 9. Build and show payload ───────────────────────────────────────
       const payload = buildDiagnosisPayload(

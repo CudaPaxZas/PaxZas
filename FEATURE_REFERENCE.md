@@ -193,6 +193,9 @@ When SASS is available it takes precedence because it is exact hardware-level da
 PTX is used as a fallback heuristic.  The selection rule applied in every model is:
 
 > **"If the SASS count for group X is > 0, use SASS.  Otherwise fall back to PTX."**
+>
+> Note: this reflects the current implementation literally. A zero-valued SASS count
+> is treated as "fallback to PTX", not as "confirmed zero from SASS".
 
 The table below shows every fused quantity, which source wins, and which model
 consumes it.
@@ -296,7 +299,7 @@ flops_proxy = scalar_flops + tensor_fp_flops + tensor_int_flops + sfu_flops
 |-----------|--------|
 | Base | `+0.60` |
 | SASS available | `+0.25` |
-| `global_mem_ops = 0` | override to `0.30` (hard to classify) |
+| `global_mem_ops = 0` | **hard override** to `0.30` (this replaces previously accumulated bonuses/penalties) |
 | `reuse_ratio > 2.0` OR `intensity < 0.5` | `+0.10` |
 | `isStreaming` | `+0.10` (unambiguous signal) |
 | `global_mem_ops < 5` (SASS present) | `−0.10` |
@@ -515,12 +518,11 @@ A single `archetype: string | undefined` field on `PatternResult` names the high
 
 Confidence reflects data-source quality.  Higher = more trustworthy classification.
 
-| Model | Base | SASS bonus | Strong-signal bonus | Penalty conditions |
-|-------|------|-----------|--------------------|--------------------|
-| Memory | 0.60 | +0.25 | +0.10 (low intensity or reuse) | `globalMemOps=0` → 0.30; `<5 ops` → −0.10/−0.20 |
-| Memory streaming | — | — | +0.10 (LD.CS present) | — |
+| Model | Base | SASS bonus | Strong-signal bonus | Penalty / override conditions |
+|-------|------|-----------|--------------------|-------------------------------|
+| Memory | 0.60 | +0.25 | +0.10 (low intensity or reuse), +0.10 (LD.CS present) | `globalMemOps=0` → **final 0.30 override**; `<5 ops` → −0.10/−0.20 |
 | Pattern | 0.55 | +0.10 | — | — |
-| Occupancy | 0.65 | — | +0.10 (launch source); +0.05 (ptx.maxnreg) | — |
+| Occupancy | 0.65 | — | +0.10 **per launch-sourced field** (`threads`, `shared`, `registers`); +0.05 (`ptx.maxnreg`) | Cap at 0.85 |
 
 ---
 
