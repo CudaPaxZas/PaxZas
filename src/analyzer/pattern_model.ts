@@ -204,19 +204,29 @@ export function analyzePattern(
   const ptxBranches = ptxFeatures.branches;
   const ptxLoops = ptxFeatures.loops;
 
-  // Select metrics (SASS if available, else PTX)
-  const sharedOps = sassShared > 0 ? sassShared : ptxShared;
-  const barriers = sassBarriers > 0 ? sassBarriers : ptxBarriers;
-  const branches = sassBranches > 0 ? sassBranches : ptxBranches;
-  const loops = ptxLoops;
+  // B5 fix: switch on data-source presence, NOT on count > 0.
+  // The old "sassCount > 0 ? sass : ptx" rule treated a legitimate zero SASS
+  // count (e.g. no global loads in a pure shared-memory kernel) as "SASS has no
+  // data" and silently substituted a stale PTX value.  That corrupted globalOps,
+  // computeOps, barriers, and branches for any kernel where SASS was available
+  // but one of those groups genuinely is zero.
+  //
+  // The correct rule: if SASS was provided, always use SASS (even when zero).
+  // Only fall back to PTX when SASS was not provided at all.
+  const hasSass = sassFeatures !== undefined;
 
-  const globalOps =
-    sassGlobal > 0
-      ? sassGlobal
-      : ptxFeatures.global_loads + ptxFeatures.global_stores;
+  const sharedOps = hasSass ? sassShared : ptxShared;
+  const barriers  = hasSass ? sassBarriers : ptxBarriers;
+  const branches  = hasSass ? sassBranches : ptxBranches;
+  const loops = ptxLoops;  // always from PTX — SASS has no loop-edge semantics
 
-  const computeOps =
-    sassCompute > 0 ? sassCompute : ptxFeatures.fma + ptxFeatures.add + ptxFeatures.mul;
+  const globalOps = hasSass
+    ? sassGlobal
+    : ptxFeatures.global_loads + ptxFeatures.global_stores;
+
+  const computeOps = hasSass
+    ? sassCompute
+    : ptxFeatures.fma + ptxFeatures.add + ptxFeatures.mul;
 
   const usesTensor =
     sassFeatures !== undefined && sassFeatures.tensor_ops > 0;

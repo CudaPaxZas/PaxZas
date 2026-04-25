@@ -1424,4 +1424,105 @@ describe("pattern_model — group A/C derived signals", () => {
     const out = analyzePattern(ptx, featuresFromSass(lines.join("\n"), "_Z8k_2loops"));
     expect(out.warp_divergence_risk).toBe(true);
   });
+
+  // ── B5 regression: SASS zero-count must not fall back to PTX ─────────────────
+  //
+  // The old rule was `sassCount > 0 ? sass : ptx`.  When SASS was present but
+  // reported 0 global ops (e.g. a pure shared-memory kernel), the code would
+  // substitute a stale PTX value, corrupting globalOps, computeOps, barriers,
+  // and branches.
+  //
+  // The fix uses `sassFeatures !== undefined` as the switch so that a legitimate
+  // zero SASS count is preserved as 0, not replaced with a PTX non-zero value.
+  it("B5 – SASS zero globalOps overrides stale PTX non-zero globalOps", () => {
+    // Build a PTX with non-zero global loads (stale / leftover from a different kernel)
+    const ptxWithGlobalLoads =
+      PTX_HEAD +
+      `
+.visible .entry _Z6sharedK(.param .u64 p)
+{
+  .reg .f32 %f<4>;
+  .reg .u64 %rd<4>;
+  // These stale global loads must NOT appear in the fused result when SASS is provided
+  ld.global.f32 %f0, [%rd0];
+  ld.global.f32 %f1, [%rd0];
+  ld.global.f32 %f2, [%rd0];
+  ld.global.f32 %f3, [%rd0];
+  ld.global.f32 %f0, [%rd0];
+  ret;
+}
+`;
+
+    // SASS for the same kernel — genuinely no global memory ops (pure shared)
+    let a = 0x9000;
+    const lines = ["Function : _Z6sharedK", ""];
+    // Only shared loads + compute, zero global loads or stores
+    for (let i = 0; i < 16; i++) {
+      lines.push(`${sassHx(a)} LDS.128 R${(i % 4) * 4}, [R24];`);
+      a += 0x10;
+    }
+    for (let i = 0; i < 32; i++) {
+      lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`);
+      a += 0x10;
+    }
+    lines.push(`${sassHx(a)} BAR.SYNC 0;`);
+
+    const ptx  = featuresFromPtx(ptxWithGlobalLoads, "_Z6sharedK");
+    const sass = featuresFromSass(lines.join("\n"), "_Z6sharedK");
+
+    const out = analyzePattern(ptx, sass);
+
+    // SASS reported 0 global ops — that must win over PTX's 5.
+    expect(out.global_ops).toBe(0);
+    // Kernel is purely shared-memory, so sharedOps > 0 from SASS.
+    expect(out.shared_ops).toBeGreaterThan(0);
+    // With zero global ops, computeToMemory → large → expect compute_heavy or tiled
+    // (not elementwise which requires low compute/memory, not memory_bound).
+    expect(["compute_heavy", "tiled", "reduction", "irregular"]).toContain(out.class);
+  });
+
+  it("B5 – SASS zero barriers overrides stale PTX non-zero barriers", () => {
+    // PTX with barriers
+    const ptxWithBarriers =
+      PTX_HEAD +
+      `
+.visible .entry _Z9noBarrierK(.param .u64 p)
+{
+  .reg .f32 %f<4>; .reg .u64 %rd<4>;
+  ld.global.f32 %f0, [%rd0];
+  bar.sync 0;   // PTX has a barrier
+  bar.sync 0;   // ... and another
+  add.f32 %f1, %f0, %f0;
+  st.global.f32 [%rd0], %f1;
+  ret;
+}
+`;
+
+    // SASS for the same kernel — no BAR.SYNC emitted (compiler elided it)
+    let a = 0xa000;
+    const lines = ["Function : _Z9noBarrierK", ""];
+    for (let i = 0; i < 8; i++) {
+      lines.push(`${sassHx(a)} LDG.E.32 R0, [R2];`);
+      a += 0x10;
+    }
+    for (let i = 0; i < 4; i++) {
+      lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`);
+      a += 0x10;
+    }
+    for (let i = 0; i < 8; i++) {
+      lines.push(`${sassHx(a)} STG.E.32 [R2], R0;`);
+      a += 0x10;
+    }
+    // Explicitly no BAR.SYNC lines
+
+    const ptx  = featuresFromPtx(ptxWithBarriers, "_Z9noBarrierK");
+    const sass = featuresFromSass(lines.join("\n"), "_Z9noBarrierK");
+
+    const out = analyzePattern(ptx, sass);
+
+    // SASS reported 0 barriers — must win over PTX's 2.
+    expect(out.barriers).toBe(0);
+    // Without barriers (or shared), can't be tiled or reduction.
+    expect(["elementwise", "compute_heavy", "control_heavy"]).toContain(out.class);
+  });
 });

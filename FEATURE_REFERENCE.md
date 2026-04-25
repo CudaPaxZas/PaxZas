@@ -192,10 +192,11 @@ evicted live values to L1/L2/DRAM-backed local memory at 100+ cycle latency per 
 When SASS is available it takes precedence because it is exact hardware-level data;
 PTX is used as a fallback heuristic.  The selection rule applied in every model is:
 
-> **"If the SASS count for group X is > 0, use SASS.  Otherwise fall back to PTX."**
->
-> Note: this reflects the current implementation literally. A zero-valued SASS count
-> is treated as "fallback to PTX", not as "confirmed zero from SASS".
+> **"If SASS was provided (`sassFeatures !== undefined`), use its count for every group — even when the count is zero.  Only fall back to PTX when SASS was not provided at all."**
+
+This is the correct rule after the B5 fix.  The previous implementation used `sassCount > 0 ? sass : ptx`, which silently substituted a stale PTX value whenever SASS legitimately reported zero for a group (e.g. zero global loads in a pure shared-memory kernel).  That corrupted `globalOps`, `computeOps`, `barriers`, and `branches` in exactly the cases where the data was most trustworthy.
+
+The only exception is **`loops`**, which always comes from PTX backward-branch-edge counting because SASS has no loop-edge semantics at the instruction level.
 
 The table below shows every fused quantity, which source wins, and which model
 consumes it.
@@ -413,13 +414,13 @@ Note: `estimated_sm_utilization` is on `KernelAnalysis` only. `OccupancyModelRes
 
 ### Step 1 — Metric extraction (SASS wins)
 
-| Internal Variable | Value (SASS present) | Value (PTX only) |
-|------------------|---------------------|-----------------|
+| Internal Variable | Value (SASS present, even if count = 0) | Value (PTX only — SASS not provided) |
+|------------------|----------------------------------------|--------------------------------------|
 | `globalOps` | `sass.global_loads + sass.global_stores` | `ptx.global_loads + ptx.global_stores` |
-| `sharedOps` | `sass.shared_loads + sass.shared_stores` | 0 |
+| `sharedOps` | `sass.shared_loads + sass.shared_stores` | 0 (PTX cannot report shared ops) |
 | `barriers` | `sass.barrier` | `ptx.barrier` |
 | `branches` | `sass.branch` | `ptx.branches` |
-| `loops` | `ptx.loops` | `ptx.loops` |
+| `loops` | `ptx.loops` | `ptx.loops` (always PTX — SASS has no loop-edge semantics) |
 | `computeOps` | `sass.arithmetic_ops + sass.tensor_ops` | `ptx.fma + ptx.add + ptx.mul` |
 
 ### Step 2 — Derived ratios
