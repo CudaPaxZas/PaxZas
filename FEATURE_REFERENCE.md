@@ -20,8 +20,8 @@ regex scans over the kernel body text.
 | `global_loads` | `number` | Count `ld.global` occurrences | `/\bld\.global\b/g` |
 | `global_stores` | `number` | Count `st.global` occurrences | `/\bst\.global\b/g` |
 | `fma` | `number` | Count FMA instructions | `/\bfma\./g` |
-| `add` | `number` | Count add instructions | `/\badd\./g` |
-| `mul` | `number` | Count multiply instructions | `/\bmul\./g` |
+| `add` | `number` | Count stand-alone `add.*` instructions; compound sub-opcodes like `red.add` and `atom.add` are excluded | `/(?<![A-Za-z0-9_.])add\./g` |
+| `mul` | `number` | Count stand-alone `mul.*` instructions; compound sub-opcodes like `shfl.idx` variants are excluded | `/(?<![A-Za-z0-9_.])mul\./g` |
 | `barrier` | `number` | Count `bar.sync` instructions | `/\bbar\.sync\b/g` |
 | `reg_decl_lines` | `number` | Count `.reg` declaration lines | `/^\s*\.reg\b/` |
 | `branches` | `number` | Count `bra` opcodes (all variants) | `/\bbra(?:\.[A-Za-z0-9_]+)*\b/g` |
