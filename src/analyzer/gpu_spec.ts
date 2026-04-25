@@ -382,23 +382,30 @@ const NAME_TO_SM_COUNT_RULES: readonly NameToSmCountRule[] = [
   { pattern: /\bV100\b/i, smCount: 80 },
   { pattern: /\bT4\b/i, smCount: 40 },
   
-  // Consumer RTX 40 series (Ampere generation)
+  // Consumer RTX 40 series (Ada Lovelace, CC 8.9)
   { pattern: /\bRTX\s*4090\b/i, smCount: 128 },
   { pattern: /\bRTX\s*4080\b/i, smCount: 76 },
   { pattern: /\bRTX\s*4070\s*Ti\b/i, smCount: 60 },
   { pattern: /\bRTX\s*4070\b/i, smCount: 46 },
   
-  // Consumer RTX 30 series (Ampere generation)
+  // Consumer RTX 30 series (Ampere, CC 8.6)
   { pattern: /\bRTX\s*3090\b/i, smCount: 82 },
   { pattern: /\bRTX\s*3080\b/i, smCount: 68 },
   { pattern: /\bRTX\s*3070\b/i, smCount: 46 },
   { pattern: /\bRTX\s*3060\b/i, smCount: 28 },
   
-  // H-series (Hopper datacenter)
-  { pattern: /\bH100\b/i, smCount: 120 },
-  { pattern: /\bH200\b/i, smCount: 132 },
+  // H-series (Hopper datacenter, CC 9.0).
+  // H100 has two distinct SKUs with different enabled SM counts:
+  //   - H100 SXM5 → 132 SMs  (nvidia-smi name: "NVIDIA H100 80GB HBM3" or "... SXM...")
+  //   - H100 PCIe → 114 SMs  (nvidia-smi name: "NVIDIA H100 PCIe")
+  //   - H100 NVL  → 114 SMs  (dual-module, but each die = 114 enabled SMs)
+  // Specific rules must appear before the generic H100 fallback (first-match wins).
+  { pattern: /\bH100\b.*\bPCIe\b/i, smCount: 114 },
+  { pattern: /\bH100\b.*\bNVL\b/i,  smCount: 114 },
+  { pattern: /\bH100\b/i,            smCount: 132 }, // SXM5 (most common datacenter SKU)
+  { pattern: /\bH200\b/i,            smCount: 132 },
   
-  // B-series (Blackwell datacenter)
+  // B-series (Blackwell datacenter, CC 10.0)
   { pattern: /\bB200\b/i, smCount: 192 },
 ];
 

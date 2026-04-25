@@ -319,8 +319,7 @@ priority waterfall:
 
 | Parameter | Priority 1 (highest) | Priority 2 | Priority 3 |
 |-----------|---------------------|-----------|-----------|
-| `registers_per_thread` | Explicit `--launch regs=` | `ptx.maxnreg` hint | `sass.max_register_index + 1` |
-| `threads_per_block` | Explicit `--launch threads=` | `ptx.maxntid` hint | — (required) |
+| `registers_per_thread` | Explicit `--launch regs=` | `ptx.maxnreg` hint | `sass.max_register_index + 1` || `threads_per_block` | Explicit `--launch threads=` | `ptx.maxntid` hint | — (required) |
 | `shared_mem_per_block` | Explicit `--launch shared=` | `ptx.static_shared` bytes (element count × byte-width of declared type) | 0 |
 
 Source labels (`"launch"`, `"ptx.maxntid"`, `"ptx.maxnreg"`, `"ptx.static_shared"`,
@@ -384,6 +383,15 @@ estimated_sm_utilization = round(occupancy × smCount) + " / " + smCount + " SMs
 ```
 
 Note: `estimated_sm_utilization` is on `KernelAnalysis` only. `OccupancyModelResult` does not expose it directly.
+
+**SM count name-heuristic SKU rules (H100):** The H100 has two distinct enabled SM counts depending on the physical form factor. The heuristic in `inferSmCountFromGpuName` matches in priority order:
+
+| nvidia-smi name pattern | SM count | SKU |
+|------------------------|----------|-----|
+| `H100 … PCIe` | 114 | H100 PCIe |
+| `H100 … NVL` | 114 | H100 NVL |
+| `H100` (generic fallback) | 132 | H100 SXM5 |
+| `H200` | 132 | H200 SXM |
 
 ---
 

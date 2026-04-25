@@ -7,6 +7,7 @@ import {
   getPresetMetadata,
   gpuSpecFromArch,
   GPU_SM_CONFIGS,
+  inferSmCountFromGpuName,
   parsePtxSmTargetVersion,
   presetForSmVersion,
 } from "../src/analyzer/gpu_spec";
@@ -66,5 +67,38 @@ describe("gpuSpecFromArch", () => {
     expect(presetForSmVersion(100)?.key).toBe("b200");
     expect(presetForSmVersion(120)?.key).toBe("blackwell-consumer-default");
     expect(getPresetMetadata("h200").cc).toBe("9.0");
+  });
+});
+
+describe("B3 – inferSmCountFromGpuName H100 SKU disambiguation", () => {
+  it("H100 SXM (generic name) → 132 SMs", () => {
+    // "NVIDIA H100 80GB HBM3" is the typical nvidia-smi name for SXM5 nodes
+    expect(inferSmCountFromGpuName("NVIDIA H100 80GB HBM3")).toBe(132);
+    expect(inferSmCountFromGpuName("NVIDIA H100 SXM5 80GB")).toBe(132);
+    expect(inferSmCountFromGpuName("H100")).toBe(132);
+  });
+
+  it("H100 PCIe → 114 SMs", () => {
+    expect(inferSmCountFromGpuName("NVIDIA H100 PCIe")).toBe(114);
+    expect(inferSmCountFromGpuName("NVIDIA H100 80GB PCIe")).toBe(114);
+  });
+
+  it("H100 NVL → 114 SMs", () => {
+    expect(inferSmCountFromGpuName("NVIDIA H100 NVL")).toBe(114);
+    expect(inferSmCountFromGpuName("NVIDIA H100 94GB NVL")).toBe(114);
+  });
+
+  it("H200 → 132 SMs (same die as H100 SXM)", () => {
+    expect(inferSmCountFromGpuName("NVIDIA H200")).toBe(132);
+    expect(inferSmCountFromGpuName("NVIDIA H200 SXM5 141GB")).toBe(132);
+  });
+
+  it("A100 / B200 are unaffected", () => {
+    expect(inferSmCountFromGpuName("NVIDIA A100-SXM4-80GB")).toBe(108);
+    expect(inferSmCountFromGpuName("NVIDIA B200")).toBe(192);
+  });
+
+  it("unknown device → undefined", () => {
+    expect(inferSmCountFromGpuName("NVIDIA GeForce GTX 1080 Ti")).toBeUndefined();
   });
 });
