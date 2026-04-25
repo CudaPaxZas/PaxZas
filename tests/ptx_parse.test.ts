@@ -88,4 +88,63 @@ ret;
     const h = parsePtxKernelHints(SAMPLE_PTX, undefined);
     expect(h.staticSharedBytes).toBe(1024); // 1024 × 1 byte
   });
+
+  // B8: MAXNREG_RE / MAXNTID_RE must be anchored to line-start.
+  // Without the `^` anchor + `m` flag, these patterns would match `.maxnreg`
+  // inside `//` line comments, producing the commented-out value instead of
+  // the real directive value.
+
+  it("B8 – commented-out .maxnreg is not parsed as the real value", () => {
+    const ptx = `
+.version 8.0
+.target sm_80
+.visible .entry _Z8commentK(
+.param .u64 p
+)
+// Previous version used .maxnreg 128 — too high
+.maxnreg 64
+{
+  ret;
+}
+`;
+    const h = parsePtxKernelHints(ptx, undefined);
+    // Must capture the real directive (64), NOT the commented value (128)
+    expect(h.maxnreg).toBe(64);
+  });
+
+  it("B8 – commented-out .maxntid is not parsed as the real value", () => {
+    const ptx = `
+.version 8.0
+.target sm_80
+.visible .entry _Z8commentK2(
+.param .u64 p
+)
+// Was: .maxntid 512, 1, 1
+.maxntid 256, 1, 1
+{
+  ret;
+}
+`;
+    const h = parsePtxKernelHints(ptx, undefined);
+    // Must capture the real directive (256), NOT the commented value (512)
+    expect(h.maxntid).toEqual([256, 1, 1]);
+  });
+
+  it("B8 – indented directives still match (leading whitespace is allowed)", () => {
+    const ptx = `
+.version 8.0
+.target sm_80
+.visible .entry _Z7indentK(
+.param .u64 p
+)
+  .maxnreg 48
+  .maxntid 128, 1, 1
+{
+  ret;
+}
+`;
+    const h = parsePtxKernelHints(ptx, undefined);
+    expect(h.maxnreg).toBe(48);
+    expect(h.maxntid).toEqual([128, 1, 1]);
+  });
 });

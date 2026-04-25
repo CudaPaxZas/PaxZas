@@ -333,7 +333,8 @@ priority waterfall:
 
 | Parameter | Priority 1 (highest) | Priority 2 | Priority 3 |
 |-----------|---------------------|-----------|-----------|
-| `registers_per_thread` | Explicit `--launch regs=` | `ptx.maxnreg` hint | `sass.max_register_index + 1` || `threads_per_block` | Explicit `--launch threads=` | `ptx.maxntid` hint | — (required) |
+| `registers_per_thread` | Explicit `--launch regs=` | `ptx.maxnreg` hint (line-anchored regex — ignores `//` comments) | `sass.max_register_index + 1` |
+| `threads_per_block` | Explicit `--launch threads=` | `ptx.maxntid` hint (line-anchored, same rule) | — (required) |
 | `shared_mem_per_block` | Explicit `--launch shared=` | `ptx.static_shared` bytes (element count × byte-width of declared type) | 0 |
 
 Source labels (`"launch"`, `"ptx.maxntid"`, `"ptx.maxnreg"`, `"ptx.static_shared"`,

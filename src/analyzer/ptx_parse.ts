@@ -11,8 +11,13 @@ export interface PtxKernelHints {
 }
 
 const ENTRY_RE = /\.(?:visible\s+)?entry\s+(\S+)\s*\(/g;
-const MAXNREG_RE = /\.maxnreg\s+(\d+)/;
-const MAXNTID_RE = /\.maxntid\s+(\d+)(?:\s*,\s*(\d+)(?:\s*,\s*(\d+))?)?/;
+// B8: anchored to line-start (multiline `m` flag) with optional leading whitespace.
+// Without anchoring, these patterns would match `.maxnreg` inside `//` comments
+// (e.g. "// Set .maxnreg 48") or inside hypothetical extended directives like
+// `.maxnreg_v2 64`.  Requiring `^[ \t]*` ensures only true standalone directives
+// on their own lines are captured.
+const MAXNREG_RE = /^[ \t]*\.maxnreg\s+(\d+)/m;
+const MAXNTID_RE = /^[ \t]*\.maxntid\s+(\d+)(?:\s*,\s*(\d+)(?:\s*,\s*(\d+))?)?/m;
 // Group 1: bit-width (8/16/32/64) from the type qualifier — may be absent.
 // Group 2: element count in brackets.
 // When no type qualifier is present the declaration is treated as raw bytes
