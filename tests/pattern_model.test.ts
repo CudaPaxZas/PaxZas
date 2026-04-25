@@ -1481,7 +1481,101 @@ describe("pattern_model — group A/C derived signals", () => {
     expect(["compute_heavy", "tiled", "reduction", "irregular"]).toContain(out.class);
   });
 
-  it("B5 – SASS zero barriers overrides stale PTX non-zero barriers", () => {
+  // ── B9: multi-kernel PTX sum must suppress density-based signals ─────────────
+  //
+  // When PTX features are summed across N kernels (kernelCount > 1), loop and
+  // branch counts span kernel boundaries.  Density ratios like warp_divergence_risk
+  // and over_synchronized become meaningless and must be forced to false.
+  it("B9 – multi-kernel PTX sum suppresses warp_divergence_risk and over_synchronized", () => {
+    // Simulate the result of sumPtxInstructionFeatures across two kernels:
+    // each kernel has 2 loops and 2 barriers → sum has 4 loops and 4 barriers.
+    // The ratio barriers/loops = 1.0 < 1.5 so over_synchronized wouldn't fire anyway,
+    // but branches * loops / compute = (4 * 4) / (1 + 1) = 8 > 0.01 → warp_divergence_risk would fire.
+    //
+    // With kernelCount = 2 these must be suppressed.
+    const sumFeatures: import("../src/analyzer/ptx_features").PtxInstructionFeatures = {
+      global_loads: 8,
+      global_stores: 4,
+      fma: 0,
+      add: 1,
+      mul: 0,
+      barrier: 4,
+      reg_decl_lines: 4,
+      branches: 4,
+      loops: 4,
+      kernelCount: 2,  // <-- multi-kernel sum
+    };
+
+    const out = analyzePattern(sumFeatures);
+
+    // These density-based signals must be suppressed when kernelCount > 1 and no SASS
+    expect(out.warp_divergence_risk).toBe(false);
+    expect(out.over_synchronized).toBe(false);
+    expect(out.high_looping).toBe(false);
+    expect(out.complex_kernel).toBe(false);
+    // The flag must be set
+    expect(out.multi_kernel_ptx).toBe(true);
+  });
+
+  it("B9 – single-kernel PTX (kernelCount = 1) does NOT suppress signals", () => {
+    // Same raw counts as above, but kernelCount = 1 (single kernel).
+    // warp_divergence_risk and over_synchronized should fire as normal.
+    const singleFeatures: import("../src/analyzer/ptx_features").PtxInstructionFeatures = {
+      global_loads: 8,
+      global_stores: 4,
+      fma: 0,
+      add: 1,
+      mul: 0,
+      barrier: 4,
+      reg_decl_lines: 4,
+      branches: 4,
+      loops: 4,
+      kernelCount: 1,  // single kernel
+    };
+
+    const out = analyzePattern(singleFeatures);
+
+    // warp_divergence_risk should fire: (4 * 4) / (1 + 1) = 8 > 0.01
+    expect(out.warp_divergence_risk).toBe(true);
+    expect(out.multi_kernel_ptx).toBe(false);
+  });
+
+  it("B9 – SASS present overrides PTX kernelCount suppression", () => {
+    // When SASS is available (hasSass = true), we use SASS counts, not PTX sums.
+    // Suppression must NOT fire even if kernelCount > 1 (SASS data is reliable).
+    const sumFeatures: import("../src/analyzer/ptx_features").PtxInstructionFeatures = {
+      global_loads: 8,
+      global_stores: 4,
+      fma: 0,
+      add: 1,
+      mul: 0,
+      barrier: 4,
+      reg_decl_lines: 4,
+      branches: 4,
+      loops: 4,
+      kernelCount: 3,  // multi-kernel sum, but SASS is present
+    };
+
+    let a = 0xd000;
+    const lines = ["Function : _Z5sassK", ""];
+    for (let i = 0; i < 4; i++) {
+      lines.push(`${sassHx(a)} LDG.E.32 R0, [R2];`); a += 0x10;
+    }
+    for (let i = 0; i < 4; i++) {
+      lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`); a += 0x10;
+    }
+    for (let i = 0; i < 4; i++) {
+      lines.push(`${sassHx(a)} BRA 0x200;`); a += 0x10;
+    }
+
+    const sass = featuresFromSass(lines.join("\n"), "_Z5sassK");
+    const out = analyzePattern(sumFeatures, sass);
+
+    // SASS overrides PTX: suppression must NOT apply (hasSass = true)
+    expect(out.multi_kernel_ptx).toBe(false);
+  });
+
+  it("B9 – SASS zero barriers overrides stale PTX non-zero barriers", () => {
     // PTX with barriers
     const ptxWithBarriers =
       PTX_HEAD +

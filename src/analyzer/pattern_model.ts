@@ -143,6 +143,13 @@ export interface PatternResult {
 
   source: string;                             // "sass" if SASS used, else "ptx"
   insight: string;                            // Human-readable explanation
+  /**
+   * B9: true when PTX instruction features were summed across 2+ `.entry` kernels.
+   * When true, density-based signals (warp_divergence_risk, over_synchronized,
+   * high_looping) are forced to false because loop/branch counts span multiple
+   * kernels and cannot represent any individual kernel's ratios reliably.
+   */
+  multi_kernel_ptx: boolean;
 }
 
 /**
@@ -653,6 +660,16 @@ export function analyzePattern(
   }
   confidence = Math.min(confidence, 0.95);  // Cap at 0.95 (never 100% certain)
 
+  // B9: When PTX features are a sum across multiple .entry kernels, loop and
+  // branch counts cross kernel boundaries and cannot represent any individual
+  // kernel's density ratios reliably.  Force the affected booleans to false so
+  // they do not mislead the diagnosis or UI badge layer.
+  const isMultiKernelPtx = !hasSass && ptxFeatures.kernelCount > 1;
+  const safeHighLooping      = isMultiKernelPtx ? false : highLooping;
+  const safeOverSynchronized = isMultiKernelPtx ? false : overSynchronized;
+  const safeWarpDivergence   = isMultiKernelPtx ? false : warpDivergenceRisk;
+  const safeComplexKernel    = isMultiKernelPtx ? false : complexKernel;
+
   // ── Group H — Kernel Archetype Recognizers ─────────────────────────────────
   // Evaluated in order; first match wins.  Raw variables already in scope:
   //   pattern, usesTensor, sharedToGlobal (== shared/global ratio), computeToMemory,
@@ -719,13 +736,11 @@ export function analyzePattern(
     sfu_heavy: sfuHeavy,
     vectorization_score: vectorizationScore,
     store_vectorization_score: storeVectorizationScore,
-    over_synchronized: overSynchronized,
     fp16_scalar_risk: fp16ScalarRisk,
     read_modify_write: readModifyWrite,
     tensor_utilization_fraction: tensorUtilizationFraction,
     productive_instruction_fraction: productiveInstructionFraction,
     shared_reuse_per_barrier: sharedReusePerBarrier,
-    warp_divergence_risk: warpDivergenceRisk,
     fp_to_int_ratio: fpToIntRatio,
     stall_memory_dependency: stallMemoryDependency,
     stall_memory_throttle: stallMemoryThrottle,
@@ -735,13 +750,16 @@ export function analyzePattern(
     uses_warp_vote: usesWarpVote,
     warp_reduction_pattern: warpReductionPattern,
     archetype,
-    high_looping: highLooping,
+    high_looping: safeHighLooping,
     sync_heavy: syncHeavy,
     control_irregular: controlIrregular,
     control_dominated: controlDominated,
-    complex_kernel: complexKernel,
+    complex_kernel: safeComplexKernel,
     tensor_dominated: tensorDominated,
+    over_synchronized: safeOverSynchronized,
+    warp_divergence_risk: safeWarpDivergence,
     source: sassFeatures !== undefined ? "sass" : "ptx",
     insight,
+    multi_kernel_ptx: isMultiKernelPtx,
   };
 }

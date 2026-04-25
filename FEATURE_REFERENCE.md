@@ -462,15 +462,38 @@ ELSE
 Source label: `"sass"` if SASS was available and produced non-zero global/shared
 traffic; `"ptx"` otherwise.  SASS presence adds `+0.1` to confidence.
 
+### Step 3b — Multi-kernel PTX suppression (B9)
+
+When a PTX translation unit contains more than one `.entry` kernel and no
+`kernelFilter` is specified, `extractPtxKernelsMerged` sums the instruction
+counters of all kernels into a single `PtxInstructionFeatures` object and sets
+`kernelCount = N` (N ≥ 2).  Loop and branch counts then cross kernel
+boundaries, making density ratios unreliable for any individual kernel.
+
+**Rule:** If `ptxFeatures.kernelCount > 1` **and** SASS was *not* provided,
+the following boolean flags are forced to `false` and `multi_kernel_ptx` is
+set to `true` in the `PatternResult`:
+
+| Flag forced to `false` |
+|------------------------|
+| `high_looping` |
+| `warp_divergence_risk` |
+| `over_synchronized` |
+| `complex_kernel` |
+
+When SASS *is* present (`sassFeatures !== undefined`) it provides single-kernel
+counts, so suppression does **not** apply even if `kernelCount > 1`.
+
 ### Step 4 — Micro-pattern boolean flags
 
 | Flag | Condition |
 |------|-----------|
-| `high_looping` | `loopDensity > 0.05` |
+| `high_looping` | `loopDensity > 0.05` (suppressed for multi-kernel PTX sum) |
 | `sync_heavy` | `barrierDensity > 0.02` |
 | `control_irregular` | `branchDensity + branchPerMem > 0.15` |
 | `control_dominated` | `computeOps / (branches + 1) < 5.0` |
-| `complex_kernel` | ≥ 2 of: {loops, barriers, highBranching} |
+| `complex_kernel` | ≥ 2 of: {loops, barriers, highBranching} (suppressed for multi-kernel PTX sum) |
+| `multi_kernel_ptx` | `ptxFeatures.kernelCount > 1 && SASS not present` |
 | `tensor_dominated` | `tensor_ops > 0 && computeToMemory > 4.0` |
 | `streaming` (micro) | `!hasShared && !hasBarrier && !hasLoops && computeToMemory < 2.0` |
 | `sync_efficiency` | `"efficient"` / `"moderate"` / `"inefficient"` (workPerBarrier thresholds) |

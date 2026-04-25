@@ -15,6 +15,13 @@ export interface PtxInstructionFeatures {
   reg_decl_lines: number;
   branches: number;
   loops: number;
+  /**
+   * B9: number of `.entry` kernels whose features were summed to produce this object.
+   * 1 means a single kernel was analyzed; > 1 means multiple kernels were summed and
+   * density-based ratios (loopDensity, warp_divergence_risk, over_synchronized, etc.)
+   * are unreliable because they cross kernel boundaries.
+   */
+  kernelCount: number;
 }
 
 function emptyPtxFeatures(): PtxInstructionFeatures {
@@ -28,6 +35,7 @@ function emptyPtxFeatures(): PtxInstructionFeatures {
     reg_decl_lines: 0,
     branches: 0,
     loops: 0,
+    kernelCount: 1,
   };
 }
 
@@ -55,6 +63,7 @@ export function ptxFeaturesAsDict(f: PtxInstructionFeatures): Record<string, num
     reg_decl_lines: f.reg_decl_lines,
     branches: f.branches,
     loops: f.loops,
+    kernel_count: f.kernelCount,
   };
 }
 
@@ -258,7 +267,11 @@ export function emptyInstructionFeatures(): PtxInstructionFeatures {
   return emptyPtxFeatures();
 }
 
-/** Sum instruction counters across kernels (whole-module proxy; `loops` is a heuristic sum). */
+/**
+ * Sum instruction counters across kernels (whole-module proxy; `loops` is a heuristic sum).
+ * Sets `kernelCount` to the number of parts so consumers can detect multi-kernel sums
+ * and suppress density-based signals (B9).
+ */
 export function sumPtxInstructionFeatures(
   parts: PtxInstructionFeatures[]
 ): PtxInstructionFeatures {
@@ -274,6 +287,7 @@ export function sumPtxInstructionFeatures(
     out.branches += p.branches;
     out.loops += p.loops;
   }
+  out.kernelCount = parts.length;
   return out;
 }
 
