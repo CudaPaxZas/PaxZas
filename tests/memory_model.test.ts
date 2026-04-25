@@ -352,4 +352,43 @@ describe("memory_model — gap fixes", () => {
     expect(readOut.load_store_balance).toBe("read_dominated");
     expect(writeOut.load_store_balance).toBe("write_dominated");
   });
+
+  // ── B4: compute_source provenance for zero-arithmetic SASS kernels ──────────
+  //
+  // When SASS is provided but contains no arithmetic instructions (e.g. a pure
+  // memory-copy or control-flow stub), the old condition `sassFlopsProxy > 0`
+  // evaluated to false and reported compute_source = "ptx", contradicting the
+  // actual data source and producing misleading provenance in the UI.
+  //
+  // The fix: `sassFeatures !== undefined ? "sass" : "ptx"` always attributes to
+  // the source that was actually present, regardless of count value.
+  it("B4 – SASS with zero arithmetic ops still reports compute_source = 'sass'", () => {
+    // Build a SASS-only kernel that moves data but does no arithmetic at all.
+    let a = 0x8000;
+    const lines: string[] = ["Function : _Z8memcpyKv", ""];
+    for (let i = 0; i < 8; i++) {
+      lines.push(`${sassHx(a)} LDG.E.128 R${i * 4}, [R24];`);
+      a += 0x10;
+    }
+    for (let i = 0; i < 8; i++) {
+      lines.push(`${sassHx(a)} STG.E.128 [R24], R${i * 4};`);
+      a += 0x10;
+    }
+    // No FFMA / FADD / IMAD — arithmetic_ops = 0, sassFlopsProxy = 0.
+    const sass = featuresFromSass(lines.join("\n"), "_Z8memcpyKv");
+    const ptxEmpty = featuresFromPtx(
+      PTX_HEAD + `\n.visible .entry _Z8memcpyKv(.param .u64 p)\n{\n  ret;\n}\n`,
+      "_Z8memcpyKv"
+    );
+
+    const out = analyzeMemory(ptxEmpty, sass);
+    // SASS was present → must say "sass", not "ptx"
+    expect(out.compute_source).toBe("sass");
+    // sass_flops_proxy should be 0 (no arithmetic), not null
+    expect(out.sass_flops_proxy).toBe(0);
+    // global memory source should also be "sass" (8 loads + 8 stores)
+    expect(out.global_mem_source).toBe("sass");
+    // Kernel should be memory-bound (loads + stores with zero compute)
+    expect(out.class).toBe("memory_bound");
+  });
 });

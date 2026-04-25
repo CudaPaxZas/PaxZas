@@ -293,6 +293,18 @@ flops_proxy = scalar_flops + tensor_fp_flops + tensor_int_flops + sfu_flops
 
 `isStreaming` = `cs_loads > 0` from SASS cache policy.
 
+### Step 4b — Data-source provenance fields
+
+`MemoryAnalysis` carries three string fields that identify where each group of metrics actually came from.  These drive the "Sources" row in the UI's Raw Features tab.
+
+| Field | Value `"sass"` when | Value `"ptx"` / `"unknown"` when |
+|-------|--------------------|---------------------------------|
+| `global_mem_source` | SASS reported `global_loads + global_stores > 0` | SASS absent **or** both counts are 0 (falls back to PTX) |
+| `shared_mem_source` | SASS reported `shared_loads + shared_stores > 0` | SASS absent or both counts are 0 → `"unknown"` (PTX cannot report shared ops) |
+| `compute_source` | SASS object was passed to `analyzeMemory` (regardless of arithmetic op count) | SASS was not passed at all → `"ptx"` |
+
+> **Why `compute_source` uses presence, not count:** A pure-memory or control-flow SASS kernel legitimately has zero arithmetic operations.  Reporting `"ptx"` in that case would be incorrect — no PTX compute data was consulted.  The rule is: *if SASS was the source, say so*, even when its arithmetic count is zero.
+
 ### Step 5 — Confidence scoring
 
 | Condition | Effect |

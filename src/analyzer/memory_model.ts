@@ -380,7 +380,11 @@ export function analyzeMemory(
     memory_pressure: memoryPressure,
     global_mem_source: hasSassGlobal ? "sass" : "ptx",
     shared_mem_source: hasSassShared ? "sass" : "unknown",
-    compute_source: sassFlopsProxy > 0 ? "sass" : "ptx",
+    // B4: attribute to "sass" whenever SASS was present, even when arithmetic_ops = 0.
+    // The old condition `sassFlopsProxy > 0` incorrectly reported "ptx" for pure-memory
+    // or control-flow SASS kernels (no FP/INT instructions), contradicting the actual
+    // data source and misleading the Raw Features tab provenance display.
+    compute_source: sassFeatures !== undefined ? "sass" : "ptx",
     cache_policy: cachePolicy,
     confidence: Math.round(confidence * 100) / 100,
     arithmetic_intensity_ops_per_byte:
