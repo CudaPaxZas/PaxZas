@@ -67,8 +67,11 @@ Stops at the next `Function:` header so only one kernel section is processed.
 
 | Field | Type | SASS Opcodes | Notes |
 |-------|------|-------------|-------|
-| `global_loads` | `number` | `LDG.*` | Total global loads regardless of width |
-| `global_stores` | `number` | `STG.*` | Total global stores regardless of width |
+| `global_loads` | `number` | `LDG.*`, `LDGSTS.*`, `CP.ASYNC.*`, `UTMALDG.*` | Total global loads regardless of width — **includes** Ampere `LDGSTS` and Hopper / Blackwell `CP.ASYNC` (async global → shared) and `UTMALDG` (TMA bulk load) |
+| `global_stores` | `number` | `STG.*`, `UTMASTG.*` | Total global stores regardless of width — includes Hopper `UTMASTG` (TMA bulk store) |
+| `async_global_loads` | `number` | `LDGSTS.*`, `CP.ASYNC.*` | Sub-share of `global_loads` issued via the async copy pipeline (bypasses the register file). |
+| `tma_ops` | `number` | `UTMALDG.*`, `UTMASTG.*` | Hopper / Blackwell Tensor-Memory-Accelerator bulk transfer count. |
+| `const_loads` | `number` | `LDC.*` | Constant-bank reads (broadcast, cached at L1). **Not counted** in `global_loads` — kept separate so global byte accounting is honest. |
 
 #### Load width sub-counters
 
@@ -77,6 +80,10 @@ Stops at the next `Function:` header so only one kernel section is processed.
 | `ldg_128` | 16 B | `.128` in opcode |
 | `ldg_64` | 8 B | `.64`, `.U64`, `.S64`, `.F64` in opcode |
 | `ldg_32` | 4 B | `.32`, `.U32`, `.S32`, `.F32` in opcode |
+| `ldg_16` | 2 B | `.U16`, `.S16`, `.F16`, or `.16` in opcode (FP16 / BF16 / INT16) |
+| `ldg_8` | 1 B | `.U8`, `.S8`, or `.8` in opcode (INT8 / FP8 / `char`) |
+
+> The 16-bit and 8-bit buckets are matched **before** the bare-numeric `.8` test so that `.U16` is not mis-routed to `ldg_8`.
 
 #### Store width sub-counters
 
@@ -85,6 +92,8 @@ Stops at the next `Function:` header so only one kernel section is processed.
 | `stg_128` | 16 B | `.128` in opcode |
 | `stg_64` | 8 B | `.64`, `.U64`, `.S64`, `.F64` in opcode |
 | `stg_32` | 4 B | `.32`, `.U32`, `.S32`, `.F32` in opcode |
+| `stg_16` | 2 B | `.U16`, `.S16`, `.F16`, or `.16` in opcode |
+| `stg_8` | 1 B | `.U8`, `.S8`, or `.8` in opcode |
 
 Unknown-width loads/stores (no width qualifier) fall back to the `defaultBytesPerOp`
 (4 B) when bytes are computed.
@@ -129,9 +138,10 @@ evicted live values to L1/L2/DRAM-backed local memory at 100+ cycle latency per 
 
 | Field | Type | SASS Opcodes | Notes |
 |-------|------|-------------|-------|
-| `arithmetic_ops` | `number` | `FFMA`, `FADD`, `FMUL`, `IADD`, `IMAD`, `IMUL`, `HFMA`, `HADD`, `HMUL` | All scalar FP/int arithmetic (FP16 scalar is also a subset) |
+| `arithmetic_ops` | `number` | `FFMA`, `FADD`, `FMUL`, `IADD`, `IMAD`, `IMUL`, `HFMA`, `HADD`, `HMUL`, **`DFMA`**, **`DADD`**, **`DMUL`**, **`DMNMX`**, **`DSETP`** | All scalar FP/int arithmetic (FP16 and FP64 scalar are subsets) |
 | `integer_ops` | `number` | `IADD`, `IMAD`, `IMUL`, `IMNMX`, `ISCADD`, `ISET`, `ICMP`, `IABS`, `INEG`, `IAND`, `IOR`, `IXOR`, `ISHL`, `ISHR` | Integer/address/control-heavy subset used by `fp_to_int_ratio` |
 | `fp16_arith_ops` | `number` | `HFMA`, `HADD`, `HMUL` | Scalar FP16 subset — **also** counted in `arithmetic_ops` |
+| `fp64_arith_ops` | `number` | `DFMA`, `DADD`, `DMUL`, `DMNMX`, `DSETP` | Scalar FP64 subset — **also** counted in `arithmetic_ops`. Tracked separately so `flops_proxy` can apply the FP64 throughput penalty (1/32 of FP32 on consumer GPUs); without this counter, CFD / molecular-dynamics kernels showed `compute_ops ≈ 0` and were always classified as `memory_bound`. |
 
 #### Tensor core
 
@@ -152,8 +162,10 @@ evicted live values to L1/L2/DRAM-backed local memory at 100+ cycle latency per 
 
 | Field | Type | SASS Opcodes |
 |-------|------|-------------|
-| `barrier` | `number` | `BAR`, `DEPBAR`, `MEMBAR` |
-| `branch` | `number` | `BRA`, `JMP`, `RET`, `SSY`, `SYNC` — **including** predicated forms `@P0 BRA` |
+| `barrier` | `number` | `BAR`, `DEPBAR`, `MEMBAR`, **`BARRIER`** (cluster-wide), **`BMOV`**, **`BSSY`** (Hopper split-barrier setup), **`WARPSYNC`**, **`ARRIVE`**, **`WAIT`** (mbarrier — Hopper / Blackwell cooperative groups). |
+| `branch` | `number` | `BRA`, `JMP`, `SSY`, `SYNC` — **including** predicated forms `@P0 BRA`. **Excludes** `RET` / `EXIT` (counted in `kernel_exit`). |
+| `kernel_exit` | `number` | `RET`, `EXIT` — split out from `branch` so per-kernel exits don't inflate branch density on small kernels. |
+| `back_edges` | `number` | `BRA <addr>` whose target hex address is **less than** the issuing PC (a backward jump that closes a loop). Used by the pattern model's `over_synchronized` check as a substitute for PTX `loops` when the compiler fully unrolled the visible loop. |
 
 ---
 
@@ -211,12 +223,12 @@ consumes it.
 | `branches` | `sass.branch` | `ptx.branches` | Pattern |
 | `loops` | — | `ptx.loops` (always PTX — SASS has no loop semantics) | Pattern |
 | `compute_ops` | `sass.arithmetic_ops + sass.tensor_ops` | `ptx.fma + ptx.add + ptx.mul` | Memory, Pattern |
-| `bytes_moved` | `estimateSassBytes()` (typed widths) | `(loads + stores) × 4` | Memory |
-| `flops_proxy` | `scalar×2 + wmma×512 + intMMA×64 + sfu×4` | `fma×2 + add + mul` | Memory |
+| `bytes_moved` | `estimateSassBytes()` (typed widths, **including 2-byte and 1-byte sub-32-bit loads/stores**) | `(loads + stores) × 4` | Memory |
+| `flops_proxy` | `scalar×2 + wmma×512 + intMMA×64 + sfu×4 + fp64×14` | `fma×2 + add + mul` | Memory |
 | `registers_per_thread` | `sass.max_register_index + 1` | `ptx.maxnreg` hint or launch param | Occupancy |
 | `threads_per_block` | — | `ptx.maxntid` hint or launch param | Occupancy |
 | `shared_mem_per_block` | — | `ptx.static_shared` (bytes, typed element size applied) or launch param | Occupancy |
-| `cache_policy` | `sass.cg_loads > 0 → "L2"; sass.cs_loads > 0 → "streaming"` | `null` | Memory |
+| `cache_policy` | dominant policy wins: `cs > cg → "streaming"`, `cg > cs → "L2"`, equal non-zero counts → `"mixed"`, both zero → `null` | `null` | Memory |
 | `tensor_ops` | `sass.tensor_ops` | 0 | Pattern |
 | `integer_ops` | `sass.integer_ops` | 0 | Pattern (`fp_to_int_ratio`) |
 | `wmma_ops` | `sass.wmma_ops` | 0 | Pattern, Memory |
@@ -226,8 +238,14 @@ consumes it.
 | `global_atomic_ops` | `sass.global_atomic_ops` | 0 | Pattern (`atomic_contention_risk` numerator) |
 | `sfu_ops` | `sass.sfu_ops` | 0 | Pattern, Memory |
 | `fp16_arith_ops` | `sass.fp16_arith_ops` | 0 | Pattern |
-| `ldg_128/64/32` | `sass.ldg_128/64/32` | 0 | Pattern (vectorization_score), Memory |
-| `stg_128/64/32` | `sass.stg_128/64/32` | 0 | Memory (store byte estimate + store_vectorization_score), Pattern (store-side coalescing/vectorization) |
+| `ldg_128/64/32/16/8` | `sass.ldg_128/64/32/16/8` | 0 | Pattern (vectorization_score uses ≥32-bit buckets), Memory (all five buckets feed `bytes_moved`) |
+| `stg_128/64/32/16/8` | `sass.stg_128/64/32/16/8` | 0 | Memory (store byte estimate + store_vectorization_score), Pattern (store-side coalescing/vectorization) |
+| `fp64_arith_ops` | `sass.fp64_arith_ops` | 0 | Memory (FP64 FLOP-proxy weighting), Pattern |
+| `const_loads` | `sass.const_loads` | 0 | (informational — kept out of `bytes_moved`) |
+| `async_global_loads` | `sass.async_global_loads` | 0 | Pattern |
+| `tma_ops` | `sass.tma_ops` | 0 | Pattern |
+| `kernel_exit` | `sass.kernel_exit` | 0 | (informational — split off `branch`) |
+| `back_edges` | `sass.back_edges` | 0 | Pattern (`over_synchronized` fallback when PTX `loops = 0`) |
 | `stream_interleave_score` | `sass.stream_interleave_score` | 0 | Pattern (interleaving) |
 | `max_consecutive_loads` | `sass.stream_max_consecutive_loads` | 0 | Pattern (interleaving) |
 | `warp_shuffle_ops` | `sass.warp_shuffle_ops` | 0 | Pattern (F2/F4 warp primitives) |
@@ -242,18 +260,20 @@ consumes it.
 ### Step 1 — Byte estimation
 
 ```
-knownLdg = ldg_128 + ldg_64 + ldg_32
+knownLdg   = ldg_128 + ldg_64 + ldg_32 + ldg_16 + ldg_8
 unknownLdg = max(0, global_loads − knownLdg)
 
-knownStg = stg_128 + stg_64 + stg_32
+knownStg   = stg_128 + stg_64 + stg_32 + stg_16 + stg_8
 unknownStg = max(0, global_stores − knownStg)
 
 bytes_moved =
-    ldg_128 × 16 + ldg_64 × 8 + ldg_32 × 4 + unknownLdg × 4
-  + stg_128 × 16 + stg_64 × 8 + stg_32 × 4 + unknownStg × 4
+    ldg_128 × 16 + ldg_64 × 8 + ldg_32 × 4 + ldg_16 × 2 + ldg_8 × 1 + unknownLdg × 4
+  + stg_128 × 16 + stg_64 × 8 + stg_32 × 4 + stg_16 × 2 + stg_8 × 1 + unknownStg × 4
 
   PTX fallback: bytes_moved = (global_loads + global_stores) × 4
 ```
+
+The 2-byte and 1-byte buckets matter for FP16 / BF16 / INT8 / FP8 kernels (CUTLASS, Flash-Attention, quantised inference): without them, a kernel doing 16-bit traffic was costed at 4 B per load and arithmetic intensity reported 50 % low.
 
 ### Step 2 — FLOP estimation
 
@@ -262,12 +282,15 @@ scalar_flops      = arithmetic_ops × 2
 tensor_fp_flops   = wmma_ops × 512               (HMMA/WGMMA/WMMA — 16×16×16 MAC)
 tensor_int_flops  = (tensor_ops − wmma_ops) × 64 (IMMA/BMMA conservative floor)
 sfu_flops         = sfu_ops × 4                  (MUFU ≈ 4 float-op equivalents)
+fp64_penalty      = fp64_arith_ops × 14          (extra weight on top of the +2 already in scalar_flops; total ≈ 16× per FP64 op)
 
-flops_proxy = scalar_flops + tensor_fp_flops + tensor_int_flops + sfu_flops
+flops_proxy = scalar_flops + tensor_fp_flops + tensor_int_flops + sfu_flops + fp64_penalty
 
   PTX fallback: flops_proxy = fma × 2 + add + mul
   Tie-break:    flops = max(sass_flops_proxy, ptx_flops_proxy)
 ```
+
+> The FP64 penalty reflects the relative cost of the FP64 pipeline (≈1/32 throughput of FP32 on consumer GPUs), so a single `DFMA` is treated as roughly 16× the work of a single `FFMA` for intensity purposes. This is what stops CFD / molecular-dynamics kernels from being flagged as `memory_bound` despite spending the bulk of their time in FP64 ALU.
 
 ### Step 3 — Derived ratios
 
@@ -293,6 +316,21 @@ flops_proxy = scalar_flops + tensor_fp_flops + tensor_int_flops + sfu_flops
 | `balanced` | (all other cases) |
 
 `isStreaming` = `cs_loads > 0` from SASS cache policy.
+
+#### `cache_policy` precedence rule
+
+When both `.CG` and `.CS`-flagged loads exist, the dominant policy wins:
+
+| `cs_loads` vs `cg_loads` | Reported `cache_policy` |
+|--------------------------|------------------------|
+| `cs > cg > 0` | `"streaming"` |
+| `cg > cs > 0` | `"L2"` |
+| `cs == cg > 0` | `"mixed"` |
+| `cs > 0`, `cg == 0` | `"streaming"` |
+| `cg > 0`, `cs == 0` | `"L2"` |
+| `cs == 0` and `cg == 0` | `null` |
+
+Previously a single `.CG` load suppressed the streaming classification on a kernel with hundreds of `.CS` loads, and consumed the `+0.10` streaming confidence bump.
 
 ### Step 4b — Data-source provenance fields
 
@@ -369,11 +407,15 @@ active_warps_per_sm = min(blocks_per_sm × warpsPerBlock, smMaxWarps)
 occupancy           = active_warps_per_sm / smMaxWarps   [0.0 – 1.0]
 ```
 
-**`KernelAnalysis` fields:** `occupancy_class` = `"low"` (<0.30) | `"medium"` (<0.60) | `"high"` (≥0.60); `register_pressure_margin`; `next_occupancy_class`; `warp_metrics`; `waste_metrics` (unused resource fractions per SM).
+**`KernelAnalysis` fields:** `occupancy_class` = `"low"` (<0.30) | `"medium"` (<0.60) | `"high"` (≥0.60); `register_pressure_margin`; `next_occupancy_class`; `next_limiting_factor`; `shared_mem_pressure_margin`; `next_occupancy_class_shared`; `next_limiting_factor_shared`; `warp_metrics`; `waste_metrics` (unused resource fractions per SM).
 
 `register_pressure_margin` is only populated when `limiting_factor = "registers"` and a higher occupancy tier exists; it reports regs/thread to shed to reach `next_occupancy_class`.
 
 `next_limiting_factor` is set alongside `register_pressure_margin` when shedding the margin regs causes a **different resource to become the new bottleneck** (e.g. `"shared_mem"`).  The tier improvement is still achievable — the register-reduction advice remains valid — but the field signals that a second optimisation will be needed to improve occupancy further.
+
+`shared_mem_pressure_margin` is the parallel of `register_pressure_margin` for shared-memory-limited kernels: when `limiting_factor = "shared_mem"` and a higher occupancy tier exists, it reports the **bytes/block to shed** to reach `next_occupancy_class_shared`. `next_limiting_factor_shared` flags the resource that becomes the new bottleneck after the suggested reduction.
+
+> Together, the register and shared-memory pressure margins back two actionable warning forms in `warnings[]`: `"≤N regs/thread (add __launch_bounds__(T)) to fit 2 blocks/SM"` and `"≤N bytes/block to fit 2 blocks/SM"`.
 
 **`OccupancyModelResult` fields:** `class` (same tier string), `confidence` (0.65–0.85), `limiting_factor`, `blocks_per_sm`, `threads_per_block`, `shared_mem_per_block`, `registers_per_thread`, `sources` (origin of each parameter), `insight`.
 
@@ -511,7 +553,7 @@ counts, so suppression does **not** apply even if `kernelCount > 1`.
 | `atomic_contention_risk` | `global_atomic_ops > 0 && globalOps > 0 && global_atomic_ops / globalOps > 0.05` — uses **global-only** atomics; ATOMS (shared-memory) is excluded to prevent false positives | Yes |
 | `sfu_heavy` | `sfu_ops > 8 && sfu_ops / (computeOps + sfu_ops + 1) > 0.15` | Yes |
 | `vectorization_score` | `(ldg_128×4 + ldg_64×2 + ldg_32×1) / (totalLdgTyped × 4)` — active range **[0.25, 1.0]**; returns **0** (inactive, not "fully scalar") when SASS unavailable or `< 4` typed loads exist | Yes |
-| `over_synchronized` | `loops > 0 && barriers ≥ 2 && barriers / loops > 1.5` | No (uses PTX loops + SASS barriers). **Caveat:** `loops` comes from PTX backward-branch-edge counting; fully compiler-unrolled loops produce `loops = 0`, causing this signal to be permanently `false` even when barriers far outnumber logical iterations. |
+| `over_synchronized` | `effectiveLoops > 0 && barriers ≥ 2 && barriers / effectiveLoops > 1.5`, where `effectiveLoops = ptx.loops || sass.back_edges` | No (uses PTX loops + SASS barriers, with SASS back-edges as a fully-unrolled-loop substitute). When PTX reports `loops = 0` because the compiler unrolled the visible loop, `sass.back_edges` (backward `BRA <addr>` jumps) acts as the per-iteration count instead — so the signal can still fire on unrolled kernels. |
 | `fp16_scalar_risk` | `fp16_arith_ops > 8 && wmma_ops = 0 && fp16_arith_ops / (computeOps + 1) > 0.2` | Yes |
 | `read_modify_write` | `storeToLoadRatio ∈ (0.5, 2.0) && computeToMemory < 1.0 && globalOps > 4` | No (SASS preferred) |
 
@@ -519,12 +561,14 @@ counts, so suppression does **not** apply even if `kernelCount > 1`.
 
 | Signal | Formula / Condition | Notes |
 |--------|---------------------|-------|
-| `tensor_utilization_fraction` | `tensor_ops / (arithmetic_ops + tensor_ops + 1)` | Continuous tensor-core adoption score, 0–1 |
-| `productive_instruction_fraction` | `(arithmetic_ops + tensor_ops + global_loads + global_stores) / total_instructions` | Instruction-level useful-work share |
+| `tensor_utilization_fraction` | `sass.tensor_ops / (sass.arithmetic_ops + sass.tensor_ops + 1)` | `number \| undefined` — continuous tensor-core adoption score (0–1) when SASS is present; **`undefined`** when SASS was not provided (the UI then renders `—` instead of a hard `0`). |
+| `productive_instruction_fraction` | `(sass.arithmetic_ops + sass.tensor_ops + sass.global_loads + sass.global_stores) / sass.total_instructions` | `number \| undefined` — instruction-level useful-work share when SASS is present; **`undefined`** for PTX-only kernels (PTX has no `total_instructions` denominator). |
 | `shared_reuse_per_barrier` | `shared_loads / (barriers + 1)` | Cooperative phase amortization quality |
 | `warp_divergence_risk` | `(branches × loops) / (computeOps + 1) > 0.01` | Loop-aware divergence risk |
 | `store_vectorization_score` | `(stg_128×4 + stg_64×2 + stg_32×1) / (totalStgTyped × 4)` | 0.25–1.0 active range; 0 when inactive |
 | `fp_to_int_ratio` | `(arithmetic_ops - integer_ops) / (integer_ops + 1)` | FP-vs-address/integer mix indicator |
+
+> Both `tensor_utilization_fraction` and `productive_instruction_fraction` are now strictly SASS-derived; reporting them as a hard `0` for PTX-only kernels (the legacy behaviour) was misleading because the formulas had a `0/1` form that always evaluated to `0` regardless of how much arithmetic the kernel actually did.
 
 ### Step 6 — Stall Reason Inference (Group E)
 
@@ -611,6 +655,35 @@ All rules are evaluated; the first match becomes `primary_bottleneck`; all subse
 
 ---
 
+## Part 9 — `analysis_mode` Detection
+
+`AnalyzerReport.analysis_mode` advertises whether the displayed analysis is grounded in the same architecture the kernel was actually compiled for.
+
+| Value | Meaning | Trigger |
+|-------|---------|---------|
+| `"native"` | The selected GPU preset matches the architecture of the SASS dump being analysed. | `expected_cc_key === sass_cc_key` for at least one detected SASS target. |
+| `"cross-arch-what-if"` | SASS is present, but its target architecture differs from the selected preset. Numbers are projected onto the preset's SM limits. | A SASS dump is present but no `sass_cc_key` matches `expected_cc_key`. |
+| `"preset-only-what-if"` | No SASS was provided — analysis is entirely PTX + preset-driven. | `sass_detected_targets` is empty. |
+
+### Compute-capability key normalisation
+
+Native detection compares **compute-capability keys**, not literal `sm_NN` numbers. The mapping in `SM_VERSION_TO_CC` collapses different SM numbers that share the same architecture-level CC into one key — so the `"native"` decision matches the way `GPU_SM_CONFIGS` defines architecture limits.
+
+| `sm_NN` | `cc` key | Notes |
+|---------|----------|-------|
+| `sm_70` / `sm_72` | `7.0` | Volta |
+| `sm_75` | `7.5` | Turing |
+| `sm_80` | `8.0` | A100 |
+| `sm_86` / `sm_87` | `8.6` | Ampere consumer / Jetson Orin (sm_87 → cc 8.6) |
+| `sm_89` | `8.9` | Ada Lovelace |
+| `sm_90` | `9.0` | Hopper |
+| `sm_100` | `10.0` | Blackwell DC |
+| `sm_120` | `12.0` | Blackwell consumer |
+
+Before this normalisation, an `sm_87` (Jetson Orin) SASS dump compared against an `sm_86` (Ampere mobile) preset was reported as `cross-arch-what-if`, even though both architectures share identical `GPU_SM_CONFIGS` limits. The cc-key comparison fixes that mismatch and only flags genuine architectural transitions (e.g. Ampere → Hopper).
+
+---
+
 ## Quick-Reference: Which Model Uses Which Raw Fields
 
 | Raw Field | Memory | Occupancy | Pattern |
@@ -626,8 +699,8 @@ All rules are evaluated; the first match becomes `primary_bottleneck`; all subse
 | `ptx.maxnreg` (hint) | — | ✓ | — |
 | `ptx.static_shared` (hint) | — | ✓ | — |
 | `sass.global_loads/stores` | ✓ | — | ✓ |
-| `sass.ldg_128/64/32` | ✓ (byte calc) | — | ✓ (vectorization_score) |
-| `sass.stg_128/64/32` | ✓ (byte calc + store_vectorization_score) | — | ✓ (store_vectorization_score, store_uncoalesced_risk) |
+| `sass.ldg_128/64/32/16/8` | ✓ (byte calc) | — | ✓ (vectorization_score uses ≥32-bit buckets) |
+| `sass.stg_128/64/32/16/8` | ✓ (byte calc + store_vectorization_score) | — | ✓ (store_vectorization_score, store_uncoalesced_risk) |
 | `sass.cg_loads / cs_loads` | ✓ (cache_policy) | — | — |
 | `sass.shared_loads/stores` | ✓ | — | ✓ |
 | `sass.arithmetic_ops` | ✓ (scalar flops) | — | ✓ |
@@ -636,11 +709,17 @@ All rules are evaluated; the first match becomes `primary_bottleneck`; all subse
 | `sass.wmma_ops` | ✓ (FP MMA flops) | — | ✓ |
 | `sass.sfu_ops` | ✓ (SFU flops) | — | ✓ |
 | `sass.fp16_arith_ops` | — | — | ✓ |
+| `sass.fp64_arith_ops` | ✓ (FLOP-proxy weighting) | — | ✓ |
+| `sass.const_loads` | — | — | (informational) |
+| `sass.async_global_loads` | — | — | ✓ |
+| `sass.tma_ops` | — | — | ✓ |
 | `sass.atomic_ops` | — | — | ✓ (total serialization count) |
 | `sass.global_atomic_ops` | — | — | ✓ (`atomic_contention_risk`) |
 | `sass.local_loads/stores` | — | — | ✓ |
-| `sass.barrier` | — | — | ✓ |
-| `sass.branch` | — | — | ✓ |
+| `sass.barrier` | — | — | ✓ (Hopper/Blackwell barriers included) |
+| `sass.branch` | — | — | ✓ (RET/EXIT excluded — see `kernel_exit`) |
+| `sass.kernel_exit` | — | — | (informational) |
+| `sass.back_edges` | — | — | ✓ (`over_synchronized` fallback when `ptx.loops = 0`) |
 | `sass.max_register_index` | — | ✓ | — |
 | `sass.stream_interleave_score` | — | — | ✓ (interleaving) |
 | `sass.stream_max_consecutive_loads` | — | — | ✓ (interleaving) |

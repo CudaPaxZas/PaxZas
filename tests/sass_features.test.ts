@@ -391,3 +391,242 @@ describe("sass_features — atomic/SFU/FP16-scalar detection", () => {
     expect(f.arithmetic_ops).toBe(3);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 1 — FP64 arithmetic detection (DFMA/DADD/DMUL/DMNMX/DSETP)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("sass_features — Gap 1: FP64 arithmetic", () => {
+  it("dfma_dadd_dmul_counted_as_fp64_and_arithmetic", () => {
+    // FP64 ops must increment BOTH fp64_arith_ops (subset) AND arithmetic_ops
+    // so the existing 2-FLOPs-per-op scalar weighting still applies; the FLOP
+    // proxy then adds an extra FP64 cost penalty in memory_model.
+    const lines = [
+      "Function : _ZN4fp647kernelEv",
+      "",
+      `    /*0000*/ DFMA R0, R2, R4, R6;`,
+      `    /*0010*/ DADD R8, R10, R12;`,
+      `    /*0020*/ DMUL R14, R16, R18;`,
+      `    /*0030*/ DMNMX.MIN R20, R22, R24, PT;`,
+      `    /*0040*/ DSETP.GT.AND P0, PT, R26, R28, PT;`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.fp64_arith_ops).toBe(5);
+    // DFMA/DADD/DMUL/DMNMX/DSETP all also bump arithmetic_ops → strict subset.
+    expect(f.arithmetic_ops).toBe(5);
+  });
+
+  it("fp64_is_strict_subset_of_arithmetic_ops_with_fp32_mix", () => {
+    // FP32 + FP64 mix: arithmetic_ops counts both, fp64_arith_ops counts only
+    // the FP64 sub-share.
+    const lines = [
+      "Function : _ZN5mixfpkernelEv",
+      "",
+      `    /*0000*/ FFMA.FTZ R0, R1, R2, R3;`,
+      `    /*0010*/ DFMA R4, R6, R8, R10;`,
+      `    /*0020*/ DADD R12, R14, R16;`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.arithmetic_ops).toBe(3);   // 1 FFMA + 2 FP64
+    expect(f.fp64_arith_ops).toBe(2);   // only the FP64 ops
+  });
+
+  it("fp32_only_kernel_has_zero_fp64_arith_ops", () => {
+    const lines = [
+      "Function : _ZN5fp32okernelEv",
+      "",
+      `    /*0000*/ FFMA.FTZ R0, R1, R2, R3;`,
+      `    /*0010*/ FADD R4, R5, R6;`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.fp64_arith_ops).toBe(0);
+    expect(f.arithmetic_ops).toBe(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 2 — Sub-32-bit and special-purpose loads
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("sass_features — Gap 2: 16-bit / 8-bit / constant / async loads", () => {
+  it("ldg_u16_and_f16_counted_as_ldg_16", () => {
+    // Half-precision and bfloat16 loads.  Without the 16-bit bucket they
+    // fell into the unknown-width fallback (4 bytes) and inflated bandwidth.
+    const lines = [
+      "Function : _ZN4ldg16kernelEv",
+      "",
+      `    /*0000*/ LDG.E.U16 R0, [R2];`,
+      `    /*0010*/ LDG.E.S16 R4, [R6];`,
+      `    /*0020*/ LDG.E.F16 R8, [R10];`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.ldg_16).toBe(3);
+    expect(f.ldg_32).toBe(0);
+    expect(f.global_loads).toBe(3);
+  });
+
+  it("ldg_u8_and_s8_counted_as_ldg_8", () => {
+    // INT8 / FP8 / char-array loads.
+    const lines = [
+      "Function : _ZN3ldg8kernelEv",
+      "",
+      `    /*0000*/ LDG.E.U8 R0, [R2];`,
+      `    /*0010*/ LDG.E.S8 R4, [R6];`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.ldg_8).toBe(2);
+    expect(f.ldg_32).toBe(0);
+    expect(f.global_loads).toBe(2);
+  });
+
+  it("ldc_constant_loads_counted_separately_not_as_global", () => {
+    // LDC reads from the per-kernel constant bank — cached, broadcast.
+    // Must NOT count as global memory; must increment const_loads.
+    const lines = [
+      "Function : _ZN3ldckernelEv",
+      "",
+      `    /*0000*/ LDC R0, c[0x0][0x10];`,
+      `    /*0010*/ LDC R4, c[0x2][0x40];`,
+      `    /*0020*/ LDG.E.32 R8, [R10];`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.const_loads).toBe(2);
+    expect(f.global_loads).toBe(1);   // only the LDG
+  });
+
+  it("ldgsts_async_global_load_counted_in_global_loads_and_async", () => {
+    // LDGSTS = Ampere global → shared async copy.  The bytes are real DRAM
+    // traffic so it counts as a global_load; tagged async for diagnostics.
+    const lines = [
+      "Function : _ZN6ldgstskernelEv",
+      "",
+      `    /*0000*/ LDGSTS.E.128 [R2], [R4];`,
+      `    /*0010*/ LDGSTS.E.128 [R6], [R8];`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.global_loads).toBe(2);
+    expect(f.async_global_loads).toBe(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 3 — Hopper / Blackwell barriers and TMA
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("sass_features — Gap 3: Hopper barriers + TMA", () => {
+  it("hopper_barrier_opcodes_counted_as_barrier", () => {
+    // BARRIER, BMOV, BSSY, WARPSYNC, ARRIVE, WAIT must all increment barrier
+    // (in addition to legacy BAR/DEPBAR/MEMBAR).
+    const lines = [
+      "Function : _ZN6hopper7kernelEv",
+      "",
+      `    /*0000*/ BAR.SYNC 0;`,
+      `    /*0010*/ BARRIER.SYNC 0;`,
+      `    /*0020*/ BMOV.32 B0, R0;`,
+      `    /*0030*/ BSSY B1, 0x100;`,
+      `    /*0040*/ WARPSYNC 0xffffffff;`,
+      `    /*0050*/ ARRIVE B2;`,
+      `    /*0060*/ WAIT B2;`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.barrier).toBe(7);
+  });
+
+  it("utma_ldg_stg_counted_as_global_and_tma_ops", () => {
+    // TMA bulk copies — Hopper / Blackwell tensor-memory accelerator.
+    // UTMALDG → global_loads + tma_ops; UTMASTG → global_stores + tma_ops.
+    const lines = [
+      "Function : _ZN3tmakernelEv",
+      "",
+      `    /*0000*/ UTMALDG.2D [R2], [R4], [R6];`,
+      `    /*0010*/ UTMALDG.2D [R8], [R10], [R12];`,
+      `    /*0020*/ UTMASTG.2D [R14], [R16];`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.tma_ops).toBe(3);
+    expect(f.global_loads).toBe(2);
+    expect(f.global_stores).toBe(1);
+  });
+
+  it("cp_async_counted_as_async_global_load", () => {
+    // CP.ASYNC — Hopper async global → shared copy (not LDG-prefixed).
+    const lines = [
+      "Function : _ZN7cpasynckernelEv",
+      "",
+      `    /*0000*/ CP.ASYNC.CG.16 [R2], [R4];`,
+      `    /*0010*/ CP.ASYNC.CA.4 [R6], [R8];`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.global_loads).toBe(2);
+    expect(f.async_global_loads).toBe(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 7 — RET / EXIT split out from branch counter
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("sass_features — Gap 7: kernel_exit split from branch", () => {
+  it("ret_and_exit_count_in_kernel_exit_not_branch", () => {
+    // RET / EXIT are kernel-end markers; must NOT inflate branch density.
+    const lines = [
+      "Function : _ZN4exitkernelEv",
+      "",
+      `    /*0000*/ FFMA.FTZ R0, R1, R2, R3;`,
+      `    /*0010*/ BRA 0x100;`,
+      `    /*0020*/ RET;`,
+      `    /*0030*/ EXIT;`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.branch).toBe(1);        // only the BRA
+    expect(f.kernel_exit).toBe(2);   // RET + EXIT
+  });
+
+  it("kernel_with_only_ret_has_zero_branch", () => {
+    // Regression: a kernel whose only control opcode is RET used to report
+    // branch=1, inflating branch_density on tiny kernels.
+    const lines = [
+      "Function : _ZN3retkernelEv",
+      "",
+      `    /*0000*/ STG.E.SYS [R2], R4;`,
+      `    /*0010*/ RET;`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.branch).toBe(0);
+    expect(f.kernel_exit).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 8 — SASS back-edge detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("sass_features — Gap 8: BRA back-edges", () => {
+  it("backward_bra_counted_as_back_edge", () => {
+    // A BRA whose target is < current PC closes a loop.  Forward BRA does not.
+    const lines = [
+      "Function : _ZN8backedgekernelEv",
+      "",
+      `    /*0000*/ FFMA.FTZ R0, R1, R2, R3;`,
+      `    /*0010*/ FFMA.FTZ R4, R5, R6, R7;`,
+      `    /*0050*/ BRA 0x100;`,         // forward — not a back-edge
+      `    /*0100*/ FFMA.FTZ R8, R9, R10, R11;`,
+      `    /*0110*/ BRA 0x000;`,          // backward — back-edge
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.back_edges).toBe(1);
+    expect(f.branch).toBe(2);   // both BRAs are still branches
+  });
+
+  it("kernel_with_no_loops_has_zero_back_edges", () => {
+    const lines = [
+      "Function : _ZN8noloopskernelEv",
+      "",
+      `    /*0000*/ FFMA.FTZ R0, R1, R2, R3;`,
+      `    /*0010*/ BRA 0x100;`,         // forward only
+      `    /*0100*/ STG.E.SYS [R2], R4;`,
+    ].join("\n");
+    const [, f] = extractSassFeatures(lines, undefined);
+    expect(f.back_edges).toBe(0);
+  });
+});

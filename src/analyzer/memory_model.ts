@@ -54,25 +54,33 @@ function estimateSassBytes(
   sass: SassInstructionFeatures,
   defaultBytesPerOp: number
 ): number {
-  // Loads: count typed widths; remaining unknowns fall back to defaultBytesPerOp
-  const knownLdg = sass.ldg_128 + sass.ldg_64 + sass.ldg_32;
+  // Gap 2: include sub-32-bit widths (LDG.E.U16 / .S16 / .F16 / .8) in the
+  // typed-load tally.  Previously these fell into the unknown-width fallback
+  // (4 bytes), inflating bandwidth on FP16/INT8 kernels by 2–4×.
+  const knownLdg =
+    sass.ldg_128 + sass.ldg_64 + sass.ldg_32 + sass.ldg_16 + sass.ldg_8;
   const unknownLdg = Math.max(0, sass.global_loads - knownLdg);
 
   // Stores: Gap 4 fix — use typed widths instead of assuming 4 bytes for all stores.
   // Before this fix, a kernel emitting STG.E.128 (16-byte coalesced writes) would
   // have its write bandwidth undercounted by 4×, making arithmetic intensity appear
   // 2–4× higher than reality and causing near-miss mis-classifications.
-  const knownStg = sass.stg_128 + sass.stg_64 + sass.stg_32;
+  const knownStg =
+    sass.stg_128 + sass.stg_64 + sass.stg_32 + sass.stg_16 + sass.stg_8;
   const unknownStg = Math.max(0, sass.global_stores - knownStg);
 
   return (
     sass.ldg_128 * 16 +              // 128-bit loads  = 16 bytes
     sass.ldg_64  * 8 +               //  64-bit loads  =  8 bytes
     sass.ldg_32  * 4 +               //  32-bit loads  =  4 bytes
+    sass.ldg_16  * 2 +               //  16-bit loads  =  2 bytes (Gap 2)
+    sass.ldg_8   * 1 +               //   8-bit loads  =  1 byte  (Gap 2)
     unknownLdg   * defaultBytesPerOp + // unknown loads = default
     sass.stg_128 * 16 +              // 128-bit stores = 16 bytes
     sass.stg_64  * 8 +               //  64-bit stores =  8 bytes
     sass.stg_32  * 4 +               //  32-bit stores =  4 bytes
+    sass.stg_16  * 2 +               //  16-bit stores =  2 bytes (Gap 2)
+    sass.stg_8   * 1 +               //   8-bit stores =  1 byte  (Gap 2)
     unknownStg   * defaultBytesPerOp   // unknown stores = default
   );
 }
@@ -199,25 +207,39 @@ export function analyzeMemory(
     sassGlobalStores = sassFeatures.global_stores;
     sassSharedLoads = sassFeatures.shared_loads;
     sassSharedStores = sassFeatures.shared_stores;
-    // Gap 1: Fix tensor FLOP proxy.  The original formula used `2 × tensor_ops`
-    // which gives ~2 FLOPs/instruction — correct for scalar FP32 FFMA but wildly
-    // wrong for tensor ops.  A single HMMA.16816.F16 performs a 16×16×16 matrix
-    // MAC across a warp = 8192 FLOPs; the per-instruction approximation is 512
-    // (a widely-used practical figure).  Integer/binary MMA (IMMA/BMMA) uses 64
-    // as a conservative floor.  Without this fix, a tensor-heavy kernel shows
-    // near-zero arithmetic intensity → incorrectly classified as memory_bound.
+    // Gap 1 (FLOP proxy): Fix tensor FLOP proxy.  The original formula used
+    // `2 × tensor_ops` which gives ~2 FLOPs/instruction — correct for scalar
+    // FP32 FFMA but wildly wrong for tensor ops.  A single HMMA.16816.F16
+    // performs a 16×16×16 matrix MAC across a warp = 8192 FLOPs; the
+    // per-instruction approximation is 512 (a widely-used practical figure).
+    // Integer/binary MMA (IMMA/BMMA) uses 64 as a conservative floor.
     //
-    // Gap 2: Include SFU ops.  MUFU.* instructions (sinf/cosf/expf/…) are real
-    // arithmetic work (~4 float-op equivalents each) but were excluded from the
-    // FLOP estimate, causing SFU-heavy kernels (sigmoid, GELU, rendering BVH) to
+    // Gap 2 (SFU): MUFU.* instructions (sinf/cosf/expf/…) are real arithmetic
+    // work (~4 float-op equivalents each) but were excluded from the FLOP
+    // estimate, causing SFU-heavy kernels (sigmoid, GELU, rendering BVH) to
     // appear falsely memory-bound.
-    const sassScalarFlops   = sassFeatures.arithmetic_ops * 2;
-    const sassTensorFpFlops = sassFeatures.wmma_ops * 512;
+    //
+    // Gap 1 (FP64 weighting): scalar FP64 ops (DFMA / DADD / DMUL …) are now
+    // counted in `arithmetic_ops` so they contribute 2 FLOPs each like FFMA.
+    // However, per-instruction *cost* on consumer GPUs is up to 32× higher
+    // than FP32 (HPC-class GPUs are closer to 2×).  To reflect that FP64
+    // kernels are far more compute-bound than the raw FLOP count suggests,
+    // we add an extra `fp64_arith_ops × 14` term.  Each DFMA therefore weighs
+    // 16 effective FLOPs: 2 (raw) + 14 (cost penalty) — a middle-ground
+    // multiplier that prevents FP64 CFD/MD kernels from being mis-classified
+    // as memory-bound while not over-stating compute for HPC-class GPUs.
+    const sassScalarFlops    = sassFeatures.arithmetic_ops * 2;
+    const sassTensorFpFlops  = sassFeatures.wmma_ops * 512;
     const sassTensorIntFlops =
       (sassFeatures.tensor_ops - sassFeatures.wmma_ops) * 64;
-    const sassSfuFlops      = sassFeatures.sfu_ops * 4;
+    const sassSfuFlops       = sassFeatures.sfu_ops * 4;
+    const sassFp64Penalty    = sassFeatures.fp64_arith_ops * 14;
     sassFlopsProxy =
-      sassScalarFlops + sassTensorFpFlops + sassTensorIntFlops + sassSfuFlops;
+      sassScalarFlops +
+      sassTensorFpFlops +
+      sassTensorIntFlops +
+      sassSfuFlops +
+      sassFp64Penalty;
     // Detailed byte estimation from SASS load/store variant info
     sassBytesProxy = estimateSassBytes(sassFeatures, bytesPerMemOp);
   }
@@ -285,15 +307,32 @@ export function analyzeMemory(
     }
   }
 
-  // Detect cache policy from SASS cache control bits
+  // Detect cache policy from SASS cache control bits.
+  //
+  // Gap 6: pick the *dominant* policy rather than letting any CG load suppress
+  // streaming detection.  Old behaviour reported "L2" on a kernel with 1 CG
+  // load and 1000 CS loads, which:
+  //   - hid the streaming cache-bypass signal,
+  //   - suppressed the +0.10 confidence boost (Gap 5 in this file), and
+  //   - made `isStreaming` false even when 99.9% of loads bypassed L1.
+  //
+  // New rule:
+  //   - cs > cg  → "streaming"   (CS dominates — bypasses are the norm)
+  //   - cg >= cs → "L2"          (CG dominates — normal cached path)
+  //   - both 0   → null          (no cache hint)
+  //   - tied (>0)→ "mixed"        (signal cannot be cleanly attributed)
   let cachePolicy: string | null = null;
   if (sassFeatures !== undefined) {
-    // CG = cache global (loads go through L2 cache normally)
-    // CS = cache streaming (cache bypasses, streaming loads)
-    if (sassFeatures.cg_loads > 0) {
-      cachePolicy = "L2";
-    } else if (sassFeatures.cs_loads > 0) {
+    const cg = sassFeatures.cg_loads;
+    const cs = sassFeatures.cs_loads;
+    if (cg === 0 && cs === 0) {
+      cachePolicy = null;
+    } else if (cs > cg) {
       cachePolicy = "streaming";
+    } else if (cg > cs) {
+      cachePolicy = "L2";
+    } else {
+      cachePolicy = "mixed";
     }
   }
   const isStreaming = cachePolicy === "streaming";

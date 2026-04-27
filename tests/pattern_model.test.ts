@@ -1620,3 +1620,108 @@ describe("pattern_model — group A/C derived signals", () => {
     expect(["elementwise", "compute_heavy", "control_heavy"]).toContain(out.class);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 5 — tensor_utilization_fraction / productive_instruction_fraction must
+//         be `undefined` (not 0) for PTX-only kernels.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("pattern_model — Gap 5: PTX-only utilisation fields are undefined", () => {
+  it("tensor_utilization_fraction_is_undefined_when_no_sass", () => {
+    const ptxMod =
+      PTX_HEAD +
+      `
+.visible .entry _Z6ptxOnK(.param .u64 p) {
+  .reg .f32 %f<4>; .reg .u64 %rd<4>;
+  ld.global.f32 %f0, [%rd1];
+  fma.rn.f32 %f1, %f0, %f0, %f0;
+  ret;
+}
+`;
+    const out = analyzePattern(featuresFromPtx(ptxMod, "_Z6ptxOnK"));
+    // Old behaviour reported 0 here; that masked "no SASS data" as
+    // "verified zero tensor work".  Gap 5 fix makes both fields undefined.
+    expect(out.tensor_utilization_fraction).toBeUndefined();
+    expect(out.productive_instruction_fraction).toBeUndefined();
+  });
+
+  it("tensor_utilization_fraction_is_defined_when_sass_present", () => {
+    let a = 0x4000;
+    const lines = ["Function : _Z7ptxSasK", ""];
+    lines.push(`${sassHx(a)} LDG.E.32 R0, [R2];`); a += 0x10;
+    for (let i = 0; i < 4; i++) {
+      lines.push(`${sassHx(a)} HMMA.16816.F32 {R0,R1,R2,R3},{R4,R5},{R6,R7},{R0,R1,R2,R3};`);
+      a += 0x10;
+    }
+    for (let i = 0; i < 4; i++) {
+      lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`);
+      a += 0x10;
+    }
+    const ptxMod =
+      PTX_HEAD +
+      `\n.visible .entry _Z7ptxSasK(.param .u64 p) { .reg .f32 %f<4>; ret; }\n`;
+    const ptx  = featuresFromPtx(ptxMod, "_Z7ptxSasK");
+    const sass = featuresFromSass(lines.join("\n"), "_Z7ptxSasK");
+    const out  = analyzePattern(ptx, sass);
+    expect(out.tensor_utilization_fraction).not.toBeUndefined();
+    expect(out.productive_instruction_fraction).not.toBeUndefined();
+    // 4 HMMA out of (4 arithmetic + 4 tensor + 1) = 4/9 ≈ 0.44
+    expect(out.tensor_utilization_fraction!).toBeGreaterThan(0.4);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 8 — over_synchronized falls back to SASS back-edges when PTX `loops` = 0
+//         (handles fully-unrolled outer loops the compiler removed in PTX).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("pattern_model — Gap 8: over_synchronized via SASS back-edges", () => {
+  function trivialPtxNoLoops(name: string): string {
+    return (
+      PTX_HEAD +
+      `\n.visible .entry ${name}(.param .u64 p) {\n  .reg .f32 %f<4>; .reg .u64 %rd<4>;\n  ld.global.f32 %f0, [%rd1];\n  ret;\n}\n`
+    );
+  }
+
+  it("backward_BRA_substitutes_for_PTX_loops_in_over_synchronized_check", () => {
+    // PTX has zero loops (compiler unrolled it), but SASS still emits a
+    // backward BRA per logical iteration AND multiple BAR.SYNCs inside the
+    // unrolled body.  Gap 8 lets `over_synchronized` fire on this case.
+    const lines: string[] = ["Function : _Z6unrlSK", ""];
+    let a = 0x5000;
+    lines.push(`${sassHx(a)} LDG.E.32 R0, [R2];`); a += 0x10;
+    for (let i = 0; i < 3; i++) {
+      lines.push(`${sassHx(a)} BAR.SYNC 0;`); a += 0x10;
+    }
+    for (let i = 0; i < 6; i++) {
+      lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`); a += 0x10;
+    }
+    // One backward BRA from 0x5100 → 0x5000 closes the loop.
+    lines.push(`${sassHx(0x5100)} BRA 0x5000;`);
+    const ptx  = featuresFromPtx(trivialPtxNoLoops("_Z6unrlSK"), "_Z6unrlSK");
+    const sass = featuresFromSass(lines.join("\n"), "_Z6unrlSK");
+    expect(ptx.loops).toBe(0);          // confirm PTX has no loops
+    expect(sass.back_edges).toBe(1);    // confirm we counted the back-edge
+    const out = analyzePattern(ptx, sass);
+    // 3 barriers / 1 effective loop = 3 > 1.5 → over_synchronized fires.
+    expect(out.over_synchronized).toBe(true);
+  });
+
+  it("no_back_edges_and_no_PTX_loops_keeps_over_synchronized_false", () => {
+    // Sanity: forward-only BRA must not trigger the loop-equivalent fallback.
+    let a = 0x5200;
+    const lines = ["Function : _Z9noLoopBSK", ""];
+    lines.push(`${sassHx(a)} LDG.E.32 R0, [R2];`); a += 0x10;
+    for (let i = 0; i < 3; i++) {
+      lines.push(`${sassHx(a)} BAR.SYNC 0;`); a += 0x10;
+    }
+    lines.push(`${sassHx(a)} BRA 0x5300;`); a += 0x10;     // forward branch
+    lines.push(`${sassHx(0x5300)} FFMA.FTZ R0, R1, R2, R3;`);
+    const ptx  = featuresFromPtx(trivialPtxNoLoops("_Z9noLoopBSK"), "_Z9noLoopBSK");
+    const sass = featuresFromSass(lines.join("\n"), "_Z9noLoopBSK");
+    expect(ptx.loops).toBe(0);
+    expect(sass.back_edges).toBe(0);
+    const out = analyzePattern(ptx, sass);
+    expect(out.over_synchronized).toBe(false);
+  });
+});

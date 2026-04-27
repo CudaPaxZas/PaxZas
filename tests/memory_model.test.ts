@@ -442,3 +442,291 @@ describe("memory_model — gap fixes", () => {
     expect(out.confidence).toBeLessThanOrEqual(0.35);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 1 — FP64 FLOP-proxy weighting in memory_model
+// (FP64 ops add an extra `fp64_arith_ops × 14` penalty so HPC kernels
+//  aren't mis-classified as memory_bound)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("memory_model — Gap 1: FP64 FLOP-proxy weighting", () => {
+  it("fp64_heavy_kernel_lifts_flops_proxy_above_fp32_only", () => {
+    // Build two kernels with the same memory footprint and same arithmetic_ops
+    // count but different precisions: pure FP32 (FFMA) vs pure FP64 (DFMA).
+    // The FP64 kernel should report a higher flops_proxy because of the +14
+    // per-op penalty added in memory_model.
+    const ptxStub =
+      PTX_HEAD +
+      `\n.visible .entry _Z6fp64K(.param .u64 p) { .reg .f32 %f<4>; ret; }\n`;
+    const ptx = featuresFromPtx(ptxStub, "_Z6fp64K");
+
+    let a32 = 0x3a00;
+    const fp32Lines = ["Function : _Z6fp64K", ""];
+    fp32Lines.push(`${sassHx(a32)} LDG.E.32 R0, [R2];`); a32 += 0x10;
+    for (let i = 0; i < 8; i++) {
+      fp32Lines.push(`${sassHx(a32)} FFMA.FTZ R0, R1, R2, R3;`);
+      a32 += 0x10;
+    }
+    const sassFp32 = featuresFromSass(fp32Lines.join("\n"), "_Z6fp64K");
+
+    let a64 = 0x3b00;
+    const fp64Lines = ["Function : _Z6fp64K", ""];
+    fp64Lines.push(`${sassHx(a64)} LDG.E.32 R0, [R2];`); a64 += 0x10;
+    for (let i = 0; i < 8; i++) {
+      fp64Lines.push(`${sassHx(a64)} DFMA R0, R2, R4, R6;`);
+      a64 += 0x10;
+    }
+    const sassFp64 = featuresFromSass(fp64Lines.join("\n"), "_Z6fp64K");
+
+    // arithmetic_ops should be identical (both 8) — FP64 ops also bump arithmetic_ops.
+    expect(sassFp32.arithmetic_ops).toBe(sassFp64.arithmetic_ops);
+    expect(sassFp64.fp64_arith_ops).toBe(8);
+    expect(sassFp32.fp64_arith_ops).toBe(0);
+
+    const fp32Out = analyzeMemory(ptx, sassFp32);
+    const fp64Out = analyzeMemory(ptx, sassFp64);
+    // The +14 penalty per FP64 op should produce 8 × 14 = 112 extra FLOPs.
+    expect(fp64Out.flops_proxy).toBeGreaterThan(fp32Out.flops_proxy);
+    expect(fp64Out.flops_proxy! - fp32Out.flops_proxy!).toBeCloseTo(8 * 14, 5);
+  });
+
+  it("fp64_kernel_arithmetic_intensity_higher_than_fp32_with_same_memory", () => {
+    // Same memory footprint, FP64 should have higher arithmetic intensity.
+    const ptxStub =
+      PTX_HEAD +
+      `\n.visible .entry _Z6fpInt(.param .u64 p) { .reg .f32 %f<4>; ret; }\n`;
+    const ptx = featuresFromPtx(ptxStub, "_Z6fpInt");
+
+    const buildSass = (op: string): string => {
+      let a = 0x3c00;
+      const lines = ["Function : _Z6fpInt", ""];
+      // Equal memory traffic in both cases.
+      for (let i = 0; i < 4; i++) {
+        lines.push(`${sassHx(a)} LDG.E.32 R0, [R2];`);
+        a += 0x10;
+      }
+      for (let i = 0; i < 16; i++) {
+        lines.push(`${sassHx(a)} ${op} R0, R1, R2, R3;`);
+        a += 0x10;
+      }
+      return lines.join("\n");
+    };
+
+    const fp32 = analyzeMemory(ptx, featuresFromSass(buildSass("FFMA.FTZ"), "_Z6fpInt"));
+    const fp64 = analyzeMemory(ptx, featuresFromSass(buildSass("DFMA"),    "_Z6fpInt"));
+    expect(fp64.arithmetic_intensity_ops_per_byte!).toBeGreaterThan(
+      fp32.arithmetic_intensity_ops_per_byte!
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 6 — cache_policy precedence: dominant policy wins (cs vs cg)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("memory_model — Gap 6: cache_policy dominance", () => {
+  function buildSassCachePolicy(opts: {
+    csCount: number;
+    cgCount: number;
+  }): string {
+    let a = 0x4000;
+    const lines = ["Function : _Z6cacheK", ""];
+    for (let i = 0; i < opts.csCount; i++) {
+      lines.push(`${sassHx(a)} LDG.E.CS.32 R${i % 8}, [R${(i % 4) + 8}];`);
+      a += 0x10;
+    }
+    for (let i = 0; i < opts.cgCount; i++) {
+      lines.push(`${sassHx(a)} LDG.E.CG.32 R${i % 8}, [R${(i % 4) + 8}];`);
+      a += 0x10;
+    }
+    lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`);
+    return lines.join("\n");
+  }
+
+  function ptxStub(): import("../src/analyzer/ptx_features").PtxInstructionFeatures {
+    return featuresFromPtx(
+      PTX_HEAD +
+        `\n.visible .entry _Z6cacheK(.param .u64 p) { .reg .f32 %f<4>; ret; }\n`,
+      "_Z6cacheK"
+    );
+  }
+
+  it("cs_dominates_cg_yields_streaming_even_with_one_cg_load", () => {
+    // 1 CG + 16 CS — old code returned "L2" (any CG suppressed streaming).
+    // After Gap 6 the dominant CS policy should win, yielding "streaming".
+    const sass = featuresFromSass(
+      buildSassCachePolicy({ csCount: 16, cgCount: 1 }),
+      "_Z6cacheK"
+    );
+    expect(sass.cs_loads).toBe(16);
+    expect(sass.cg_loads).toBe(1);
+    const out = analyzeMemory(ptxStub(), sass);
+    expect(out.cache_policy).toBe("streaming");
+  });
+
+  it("cg_dominates_cs_yields_L2", () => {
+    // 12 CG + 1 CS — CG dominates; result must be "L2".
+    const sass = featuresFromSass(
+      buildSassCachePolicy({ csCount: 1, cgCount: 12 }),
+      "_Z6cacheK"
+    );
+    const out = analyzeMemory(ptxStub(), sass);
+    expect(out.cache_policy).toBe("L2");
+  });
+
+  it("equal_cs_and_cg_counts_yield_mixed", () => {
+    // Tied counts → can't cleanly attribute → "mixed".
+    const sass = featuresFromSass(
+      buildSassCachePolicy({ csCount: 4, cgCount: 4 }),
+      "_Z6cacheK"
+    );
+    expect(sass.cs_loads).toBe(4);
+    expect(sass.cg_loads).toBe(4);
+    const out = analyzeMemory(ptxStub(), sass);
+    expect(out.cache_policy).toBe("mixed");
+  });
+
+  it("zero_typed_loads_yields_null_cache_policy", () => {
+    // Plain LDG with no .CS / .CG modifier → no cache hint.
+    let a = 0x4500;
+    const lines = ["Function : _Z6cacheK", ""];
+    for (let i = 0; i < 8; i++) {
+      lines.push(`${sassHx(a)} LDG.E.32 R${i}, [R${i + 8}];`);
+      a += 0x10;
+    }
+    const sass = featuresFromSass(lines.join("\n"), "_Z6cacheK");
+    expect(sass.cs_loads).toBe(0);
+    expect(sass.cg_loads).toBe(0);
+    const out = analyzeMemory(ptxStub(), sass);
+    expect(out.cache_policy).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 2 — Sub-32-bit loads/stores feed estimateSassBytes() at correct widths.
+//
+// Before Gap 2, half/bf16 loads (LDG.E.U16, LDG.E.F16) and INT8/FP8 loads
+// (LDG.E.U8) fell into the unknown-width fallback bucket and were costed at
+// 4 bytes each.  This inflated bandwidth on FP16/INT8 kernels by 2–4× and
+// pushed arithmetic intensity below thresholds → false memory_bound calls.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("memory_model — Gap 2: sub-32-bit byte accounting", () => {
+  function ptxStubFor(kernel: string): import("../src/analyzer/ptx_features").PtxInstructionFeatures {
+    return featuresFromPtx(
+      PTX_HEAD +
+        `\n.visible .entry ${kernel}(.param .u64 p) { .reg .f32 %f<4>; ret; }\n`,
+      kernel
+    );
+  }
+
+  it("ldg_16_loads_cost_2_bytes_each_not_4", () => {
+    // 8 × LDG.E.U16 → bytes_proxy must be 8 × 2 = 16 (not 8 × 4 = 32).
+    let a = 0x5000;
+    const lines = ["Function : _Z6sub16K", ""];
+    for (let i = 0; i < 8; i++) {
+      lines.push(`${sassHx(a)} LDG.E.U16 R${i}, [R${i + 8}];`);
+      a += 0x10;
+    }
+    const sass = featuresFromSass(lines.join("\n"), "_Z6sub16K");
+    expect(sass.ldg_16).toBe(8);
+    expect(sass.ldg_32).toBe(0);
+    const out = analyzeMemory(ptxStubFor("_Z6sub16K"), sass);
+    expect(out.bytes_proxy).toBe(16);
+  });
+
+  it("ldg_8_loads_cost_1_byte_each_not_4", () => {
+    // 16 × LDG.E.U8 → bytes_proxy must be 16 × 1 = 16 (not 16 × 4 = 64).
+    let a = 0x5100;
+    const lines = ["Function : _Z5int8K", ""];
+    for (let i = 0; i < 16; i++) {
+      lines.push(`${sassHx(a)} LDG.E.U8 R${i}, [R${i + 16}];`);
+      a += 0x10;
+    }
+    const sass = featuresFromSass(lines.join("\n"), "_Z5int8K");
+    expect(sass.ldg_8).toBe(16);
+    expect(sass.ldg_32).toBe(0);
+    const out = analyzeMemory(ptxStubFor("_Z5int8K"), sass);
+    expect(out.bytes_proxy).toBe(16);
+  });
+
+  it("stg_16_stores_cost_2_bytes_each_not_4", () => {
+    // 4 × STG.E.U16 → bytes_proxy must be 4 × 2 = 8.
+    let a = 0x5200;
+    const lines = ["Function : _Z7stg16wK", ""];
+    for (let i = 0; i < 4; i++) {
+      lines.push(`${sassHx(a)} STG.E.U16 [R${i * 2}], R${i * 2 + 1};`);
+      a += 0x10;
+    }
+    const sass = featuresFromSass(lines.join("\n"), "_Z7stg16wK");
+    expect(sass.stg_16).toBe(4);
+    expect(sass.stg_32).toBe(0);
+    const out = analyzeMemory(ptxStubFor("_Z7stg16wK"), sass);
+    expect(out.bytes_proxy).toBe(8);
+  });
+
+  it("stg_8_stores_cost_1_byte_each_not_4", () => {
+    let a = 0x5300;
+    const lines = ["Function : _Z6stg8wK", ""];
+    for (let i = 0; i < 6; i++) {
+      lines.push(`${sassHx(a)} STG.E.U8 [R${i * 2}], R${i * 2 + 1};`);
+      a += 0x10;
+    }
+    const sass = featuresFromSass(lines.join("\n"), "_Z6stg8wK");
+    expect(sass.stg_8).toBe(6);
+    expect(sass.stg_32).toBe(0);
+    const out = analyzeMemory(ptxStubFor("_Z6stg8wK"), sass);
+    expect(out.bytes_proxy).toBe(6);
+  });
+
+  it("fp16_kernel_arithmetic_intensity_higher_than_pre_gap2_estimate", () => {
+    // Mixed: 16 × LDG.E.U16 (32 bytes after fix; 64 bytes before) + 16 × HFMA.
+    // After Gap 2 the byte count is halved, so arithmetic intensity should be
+    // measurably higher than the same workload reinterpreted as 32-bit loads.
+    const ptx = ptxStubFor("_Z5fp16K");
+
+    const buildSass = (loadOp: string): string => {
+      let a = 0x5400;
+      const lines = ["Function : _Z5fp16K", ""];
+      for (let i = 0; i < 16; i++) {
+        lines.push(`${sassHx(a)} ${loadOp} R${i}, [R${i + 16}];`);
+        a += 0x10;
+      }
+      for (let i = 0; i < 16; i++) {
+        lines.push(`${sassHx(a)} HFMA R${i % 8}, R0, R1, R2;`);
+        a += 0x10;
+      }
+      return lines.join("\n");
+    };
+
+    const fp16 = analyzeMemory(ptx, featuresFromSass(buildSass("LDG.E.U16"), "_Z5fp16K"));
+    const fp32 = analyzeMemory(ptx, featuresFromSass(buildSass("LDG.E.32"),  "_Z5fp16K"));
+
+    // Same arithmetic side, half the bytes — fp16 must have higher intensity.
+    expect(fp16.arithmetic_intensity_ops_per_byte!).toBeGreaterThan(
+      fp32.arithmetic_intensity_ops_per_byte!
+    );
+    // Concretely: fp16 bytes = 32, fp32 bytes = 64 → ratio ≈ 2×.
+    expect(fp16.bytes_proxy).toBe(32);
+    expect(fp32.bytes_proxy).toBe(64);
+  });
+
+  it("constant_loads_do_NOT_inflate_bytes_proxy_for_global_traffic", () => {
+    // LDC pulls from the constant bank — it must not be added to global byte
+    // accounting.  bytes_proxy should still be 0 for a kernel that only does
+    // LDC and arithmetic.
+    let a = 0x5500;
+    const lines = ["Function : _Z5constK", ""];
+    for (let i = 0; i < 8; i++) {
+      lines.push(`${sassHx(a)} LDC R${i}, c[0x0][0x${(i * 4).toString(16)}];`);
+      a += 0x10;
+    }
+    lines.push(`${sassHx(a)} FFMA.FTZ R0, R1, R2, R3;`);
+    const sass = featuresFromSass(lines.join("\n"), "_Z5constK");
+    expect(sass.const_loads).toBe(8);
+    expect(sass.global_loads).toBe(0); // crucially: constant ≠ global
+    const out = analyzeMemory(ptxStubFor("_Z5constK"), sass);
+    // Pure compute (1 FFMA) with no global traffic → bytes_proxy is 0.
+    expect(out.bytes_proxy).toBe(0);
+  });
+});

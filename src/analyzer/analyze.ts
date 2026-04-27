@@ -11,7 +11,12 @@ import {
 import { extractPtxKernelsMerged } from "./parallel_kernel_extract";
 import { detectSassSmTargets, extractSassFeatures } from "./sass_features";
 import { mergeLaunchWithHints } from "./merge_launch";
-import { getPresetMetadata, resolveGpuSpecForAnalysis } from "./gpu_spec";
+import {
+  getPresetMetadata,
+  resolveGpuSpecForAnalysis,
+  SM_VERSION_TO_CC,
+} from "./gpu_spec";
+import type { GpuComputeCapabilityKey } from "./gpu_spec";
 import type { PtxKernelHints } from "./ptx_parse";
 import { runModelsParallelOrSync } from "./run_models_parallel";
 import { diagnoseKernel } from "./diagnose";
@@ -130,17 +135,40 @@ export async function analyze(
   const presetSm = presetMeta ? parseSmVersionFromTag(presetMeta.smTag) : undefined;
   const resolvedSm = parseSmFromSpecName(spec.name);
   const expectedSm = presetSm ?? resolvedSm;
+
+  // Gap 9: normalise SASS targets and the expected capability through the
+  // SM_VERSION_TO_CC mapping before comparing.  SM versions that share an
+  // architecture (e.g. sm_87 Jetson Orin and sm_86 Ampere mobile both →
+  // cc 8.6) should be treated as the same architecture for the "native"
+  // classification — otherwise the user sees a cross-arch warning even
+  // though the GPU_SM_CONFIGS table treats both targets identically.
+  const expectedCc: GpuComputeCapabilityKey | undefined =
+    expectedSm !== undefined ? SM_VERSION_TO_CC[expectedSm] : undefined;
+  const sassTargetCcs = new Set<GpuComputeCapabilityKey>();
+  for (const sm of sassTargets) {
+    const cc = SM_VERSION_TO_CC[sm];
+    if (cc !== undefined) {
+      sassTargetCcs.add(cc);
+    }
+  }
+  const isNative =
+    expectedCc !== undefined &&
+    (sassTargetCcs.has(expectedCc) ||
+      // Fall back to literal SM equality when either side wasn't found in
+      // SM_VERSION_TO_CC — preserves correct behaviour for unknown / future
+      // SM numbers that aren't in the mapping yet.
+      (expectedSm !== undefined && sassTargets.includes(expectedSm)));
   const analysisMode: AnalyzerReport["analysis_mode"] =
     sassTargets.length === 0
       ? "preset-only-what-if"
-      : expectedSm !== undefined && sassTargets.includes(expectedSm)
+      : isNative
         ? "native"
         : "cross-arch-what-if";
   const analysisModeNote =
     analysisMode === "native"
-      ? `SASS targets (${sassTargetTags.join(", ")}) include resolved capability sm_${expectedSm}.`
+      ? `SASS targets (${sassTargetTags.join(", ")}) match resolved capability sm_${expectedSm} (cc ${expectedCc ?? "?"}).`
       : analysisMode === "cross-arch-what-if"
-        ? `SASS targets (${sassTargetTags.join(", ")}) do not include resolved capability sm_${expectedSm ?? "?"}; results are cross-arch what-if.`
+        ? `SASS targets (${sassTargetTags.join(", ")}) do not match resolved capability sm_${expectedSm ?? "?"} (cc ${expectedCc ?? "?"}); results are cross-arch what-if.`
         : `No architecture markers found in SASS; results use preset/resolved capability ${spec.name} as a what-if target.`;
 
   if (sassText && !hasPtxEntry(text)) {

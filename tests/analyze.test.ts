@@ -32,3 +32,80 @@ describe("analyze()", () => {
     expect(r.ptx_kernel).toBe("_Z3foov");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 9 — analysis_mode "native" detection compares cc keys, not literal SMs
+//
+// `sm_87` (Jetson Orin) and `sm_86` (Ampere mobile) both map to compute
+// capability 8.6 in SM_VERSION_TO_CC.  Before Gap 9 a SASS dump for `sm_87`
+// against an Ampere-mobile preset was reported as `cross-arch-what-if`; after
+// the fix both resolve to the same cc key and the analysis_mode is "native".
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("analyze() — Gap 9: analysis_mode native via cc-key", () => {
+  const PTX_BARE_LDG = `
+.version 7.4
+.target sm_86
+.address_size 64
+.visible .entry _Z6smCcKv()
+.maxntid 256, 1, 1
+.maxnreg 48
+{
+  .reg .f32 %f<2>;
+  .reg .u64 %rd<2>;
+  ld.global.f32 %f1, [%rd1];
+  ret;
+}
+`;
+
+  // The "ampere-like-default" preset has smTag = sm_86 (cc 8.6); we use it as
+  // the reference target for the cc-key normalisation tests below.
+
+  it("matches sm_86 SASS against ampere-like-default preset as native", async () => {
+    const sass = [
+      "Fatbin elf code:",
+      "code for sm_86",
+      "Function : _Z6smCcKv",
+      "    /*0010*/ LDG.E.32 R0, [R2];",
+    ].join("\n");
+    const r = await analyze(PTX_BARE_LDG, {}, undefined, sass, "ampere-like-default");
+    expect(r.error).toBeUndefined();
+    expect(r.analysis_mode).toBe("native");
+    expect(r.sass_detected_targets).toContain("sm_86");
+  });
+
+  it("matches sm_87 (Jetson Orin) SASS against ampere-like-default (sm_86) preset as native", async () => {
+    // Both sm_87 and sm_86 map to cc 8.6 in SM_VERSION_TO_CC.  Pre-Gap-9 the
+    // literal-equality check would flag this as cross-arch-what-if; now the
+    // cc-key normalisation should classify it as "native".
+    const sass = [
+      "Fatbin elf code:",
+      "code for sm_87",
+      "Function : _Z6smCcKv",
+      "    /*0010*/ LDG.E.32 R0, [R2];",
+    ].join("\n");
+    const r = await analyze(PTX_BARE_LDG, {}, undefined, sass, "ampere-like-default");
+    expect(r.error).toBeUndefined();
+    expect(r.analysis_mode).toBe("native");
+    expect(r.sass_detected_targets).toContain("sm_87");
+  });
+
+  it("flags sm_90 SASS against ampere-like-default (sm_86) preset as cross-arch-what-if", async () => {
+    // Genuinely different architecture (Hopper vs Ampere) — must NOT be native.
+    const sass = [
+      "Fatbin elf code:",
+      "code for sm_90",
+      "Function : _Z6smCcKv",
+      "    /*0010*/ LDG.E.32 R0, [R2];",
+    ].join("\n");
+    const r = await analyze(PTX_BARE_LDG, {}, undefined, sass, "ampere-like-default");
+    expect(r.error).toBeUndefined();
+    expect(r.analysis_mode).toBe("cross-arch-what-if");
+  });
+
+  it("uses preset-only-what-if when no SASS targets are detected", async () => {
+    const r = await analyze(PTX_BARE_LDG, {}, undefined, undefined, "ampere-like-default");
+    expect(r.error).toBeUndefined();
+    expect(r.analysis_mode).toBe("preset-only-what-if");
+  });
+});

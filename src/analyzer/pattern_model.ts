@@ -103,10 +103,22 @@ export interface PatternResult {
   fp16_scalar_risk: boolean;
   /** global_stores ≈ global_loads with low compute — scatter/histogram RMW shape. */
   read_modify_write: boolean;
-  /** Tensor op fraction of compute instructions (0..1). */
-  tensor_utilization_fraction: number;
-  /** Fraction of total instructions that are "useful" compute or global memory work. */
-  productive_instruction_fraction: number;
+  /**
+   * Tensor op fraction of compute instructions (0..1).
+   *
+   * Gap 5: undefined when SASS is not provided.  The PTX feature set has no
+   * tensor-op signal at all, so emitting a hard 0 in PTX-only mode (the old
+   * behaviour) was misleading — it implied "no tensor cores observed" instead
+   * of "cannot tell".  The UI should render `—` for undefined.
+   */
+  tensor_utilization_fraction: number | undefined;
+  /**
+   * Fraction of total instructions that are "useful" compute or global I/O.
+   *
+   * Gap 5: undefined when SASS is not provided (PTX has no notion of total
+   * instructions, so the denominator was always 0 → forced 0 numerator).
+   */
+  productive_instruction_fraction: number | undefined;
   /** Shared-load reuse between synchronization phases. */
   shared_reuse_per_barrier: number;
   /** Loop-aware divergence risk: (branches * loops)/(compute + 1) > 0.01. */
@@ -458,10 +470,20 @@ export function analyzePattern(
   // certainly syncs more than once per loop iteration. Require at least 2
   // barriers and at least 1 loop to avoid false positives on trivially simple
   // kernels.
+  //
+  // Gap 8: when PTX `loops` is 0 because the compiler fully unrolled the
+  // outer loop, fall back to the SASS back-edge count (`back_edges` from
+  // sass_features.ts).  A backward BRA still represents a logical iteration,
+  // so this lets `over_synchronized` fire on unrolled tiled / reduction
+  // kernels that previously slipped through.  PTX-derived `loops` wins when
+  // present (more reliable for non-unrolled cases).
+  const sassBackEdges =
+    sassFeatures !== undefined ? sassFeatures.back_edges : 0;
+  const effectiveLoops = loops > 0 ? loops : sassBackEdges;
   const overSynchronized =
-    loops > 0 &&
+    effectiveLoops > 0 &&
     barriers >= 2 &&
-    safeDiv(barriers, loops) > 1.5;
+    safeDiv(barriers, effectiveLoops) > 1.5;
 
   // ── FP16 scalar risk ─────────────────────────────────────────────────────
   //
@@ -541,20 +563,31 @@ export function analyzePattern(
   const globalStores =
     sassFeatures !== undefined ? sassFeatures.global_stores : ptxFeatures.global_stores;
 
-  const tensorUtilizationFraction =
-    Math.round(safeDiv(sassFeatures?.tensor_ops ?? 0, (sassFeatures?.arithmetic_ops ?? 0) + (sassFeatures?.tensor_ops ?? 0) + 1) * 1e6) / 1e6;
-  const productiveInstructionFraction =
-    totalInstrCount > 0
+  // Gap 5: only compute SASS-derived utilization fractions when SASS exists.
+  // PTX features carry no tensor-op or total-instruction signal, so the
+  // previous "always emit 0" behaviour was indistinguishable from "verified
+  // zero tensor utilisation" and confused the UI badge layer.
+  const tensorUtilizationFraction: number | undefined =
+    sassFeatures !== undefined
       ? Math.round(
           safeDiv(
-            (sassFeatures?.arithmetic_ops ?? 0) +
-              (sassFeatures?.tensor_ops ?? 0) +
+            sassFeatures.tensor_ops,
+            sassFeatures.arithmetic_ops + sassFeatures.tensor_ops + 1
+          ) * 1e6
+        ) / 1e6
+      : undefined;
+  const productiveInstructionFraction: number | undefined =
+    sassFeatures !== undefined && totalInstrCount > 0
+      ? Math.round(
+          safeDiv(
+            sassFeatures.arithmetic_ops +
+              sassFeatures.tensor_ops +
               globalLoads +
               globalStores,
             totalInstrCount
           ) * 1e6
         ) / 1e6
-      : 0;
+      : undefined;
   const sharedLoadsCount =
     sassFeatures !== undefined ? sassFeatures.shared_loads : 0;
   const sharedReusePerBarrier =

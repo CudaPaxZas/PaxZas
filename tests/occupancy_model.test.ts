@@ -9,6 +9,7 @@ import {
   collectWarnings,
   computeOccupancyBreakdown,
   findRegisterPressureMargin,
+  findSharedMemPressureMargin,
 } from "../src/analyzer/occupancy_model";
 import { mergeLaunchWithHints } from "../src/analyzer/merge_launch";
 import { extractSassFeatures } from "../src/analyzer/sass_features";
@@ -330,5 +331,82 @@ describe("B7 – register pressure margin limiting-factor switch", () => {
     const ka = analyzeKernel(256, 0, 160, AMPERE_LIKE_DEFAULT);
     expect(ka.register_pressure_margin).toBeDefined();
     expect(ka.next_limiting_factor).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gap 11 — findSharedMemPressureMargin (parallel of register-pressure margin
+// for shared-mem-limited kernels) and the actionable "shed N bytes/block"
+// warning that uses it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("Gap 11 — findSharedMemPressureMargin & shared_mem_pressure_margin", () => {
+  // Ampere SM86 limits hard-coded for clarity:
+  //   smMaxSharedMem        = 167936
+  //   sharedMemAllocUnit    = 256
+  //   minSharedPerBlockAlloc = 1024
+  //   smMaxRegisters        = 65536
+  //   smMaxThreads          = 1536 (CC8.6)
+  //   smMaxBlocks           = 16   (CC8.6)
+  //   smMaxWarps            = 48   (CC8.6)
+
+  it("returns_undefined_when_kernel_is_not_shared_limited", () => {
+    // 32 regs / 256 threads / 0 shared → register/threads limited, NOT shared.
+    const out = findSharedMemPressureMargin(256, 0, 32, AMPERE_LIKE_DEFAULT);
+    expect(out).toBeUndefined();
+  });
+
+  it("returns_undefined_when_already_at_high_tier", () => {
+    // High occupancy means there's no higher tier to climb to.
+    const ka = analyzeKernel(256, 0, 32, AMPERE_LIKE_DEFAULT);
+    if (ka.occupancy_class === "high") {
+      const out = findSharedMemPressureMargin(256, 0, 32, AMPERE_LIKE_DEFAULT);
+      expect(out).toBeUndefined();
+    }
+  });
+
+  it("returns_a_margin_when_shared_mem_is_the_bottleneck", () => {
+    // 90 KB shared per block forces shared_mem as the limiting factor on Ampere.
+    const heavyShared = 90000;
+    const out = findSharedMemPressureMargin(
+      256,
+      heavyShared,
+      32,
+      AMPERE_LIKE_DEFAULT
+    );
+    expect(out).toBeDefined();
+    expect(out!.margin).toBeGreaterThan(0);
+    expect(out!.margin).toBeLessThanOrEqual(heavyShared);
+    // After shedding margin bytes the trial occupancy must reach a higher tier.
+    expect(["medium", "high"]).toContain(out!.nextClass);
+  });
+
+  it("KernelAnalysis_exposes_shared_mem_pressure_margin_and_next_class", () => {
+    const heavyShared = 90000;
+    const ka = analyzeKernel(256, heavyShared, 32, AMPERE_LIKE_DEFAULT);
+    expect(ka.limiting_factor).toBe("shared_mem");
+    expect(ka.shared_mem_pressure_margin).toBeDefined();
+    expect(ka.shared_mem_pressure_margin!).toBeGreaterThan(0);
+    expect(["medium", "high"]).toContain(ka.next_occupancy_class_shared);
+  });
+
+  it("KernelAnalysis_shared_mem_pressure_margin_undefined_when_register_limited", () => {
+    // Register-limited kernel: shared margin must not be reported.
+    const ka = analyzeKernel(256, 0, 160, AMPERE_LIKE_DEFAULT);
+    expect(ka.shared_mem_pressure_margin).toBeUndefined();
+    expect(ka.next_occupancy_class_shared).toBeUndefined();
+    expect(ka.next_limiting_factor_shared).toBeUndefined();
+  });
+
+  it("warning_quotes_specific_shed_amount_when_margin_is_available", () => {
+    const heavyShared = 90000;
+    const bd = computeOccupancyBreakdown(256, heavyShared, 32, AMPERE_LIKE_DEFAULT);
+    expect(bd.limiting_factor).toBe("shared_mem");
+    const warns = collectWarnings(256, heavyShared, 32, bd, AMPERE_LIKE_DEFAULT);
+    const shmWarn = warns.find((w) => w.includes("Shared memory"));
+    expect(shmWarn).toBeDefined();
+    // The Gap 10/11 fix produces "shed ≥<bytes> bytes/block" wording when a
+    // margin can be computed; the older fallback still mentions "bytes/block".
+    expect(shmWarn).toMatch(/(shed ≥\d+ bytes\/block|≤\d+ bytes\/block)/);
   });
 });

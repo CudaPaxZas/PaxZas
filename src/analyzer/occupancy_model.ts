@@ -370,9 +370,25 @@ export function collectWarnings(
     const unit = spec.sharedMemAllocUnit;
     const targetShared =
       Math.floor(Math.floor(spec.smMaxSharedMem / 2) / unit) * unit;
-    warnings.push(
-      `Shared memory limits occupancy — reduce to ≤${targetShared} bytes/block to fit 2 blocks/SM`
+    // Gap 11: also probe the binary-search margin so the message can quote a
+    // specific shed amount when one would actually unlock a higher tier.
+    const margin = findSharedMemPressureMargin(
+      threadsPerBlock,
+      sharedMemPerBlock,
+      registersPerThread,
+      spec
     );
+    if (margin !== undefined) {
+      warnings.push(
+        `Shared memory limits occupancy — shed ≥${margin.margin} bytes/block ` +
+          `(target ≤${sharedMemPerBlock - margin.margin} bytes) to reach ` +
+          `'${margin.nextClass}' occupancy`
+      );
+    } else {
+      warnings.push(
+        `Shared memory limits occupancy — reduce to ≤${targetShared} bytes/block to fit 2 blocks/SM`
+      );
+    }
   }
 
   // Occupancy threshold
@@ -424,6 +440,28 @@ export interface KernelAnalysis extends Record<string, unknown> {
    * when `register_pressure_margin` is undefined.
    */
   next_limiting_factor: LimitName | undefined;
+  /**
+   * Gap 11: Minimum shared-memory reduction (bytes/block) needed to reach the
+   * next occupancy tier.  Only populated when the limiting factor is
+   * "shared_mem" and the current tier is not already "high".  Computed by
+   * `findSharedMemPressureMargin()`.
+   * Example: 4096 means reducing per-block shared memory by 4 KB would
+   * improve the occupancy tier.
+   */
+  shared_mem_pressure_margin: number | undefined;
+  /**
+   * Gap 11: The occupancy tier reached after shedding
+   * `shared_mem_pressure_margin` bytes/block.  Values: "medium" | "high".
+   * Undefined when `shared_mem_pressure_margin` is undefined.
+   */
+  next_occupancy_class_shared: string | undefined;
+  /**
+   * Gap 11: When the limiting factor switches after the shared-memory
+   * reduction (e.g. to "registers"), this field names the new bottleneck.
+   * The shared-memory advice is still valid — the tier improvement is real —
+   * but the user should also address this resource for further gains.
+   */
+  next_limiting_factor_shared: LimitName | undefined;
   limiting_factor: LimitName;
   blocks_per_sm: number;
   limits: Record<string, number>;
@@ -542,6 +580,108 @@ export function findRegisterPressureMargin(
   return { margin: registersPerThread - best, nextClass: bestClass, limitingSwitchesTo };
 }
 
+/**
+ * Gap 11: Finds the minimum shared-memory reduction that moves a kernel to a
+ * higher occupancy tier — the symmetric counterpart to
+ * `findRegisterPressureMargin` for shared-memory-limited kernels.
+ *
+ * Algorithm mirrors the register-pressure margin search:
+ * 1. Bail out early when the kernel is not shared-mem-limited, is already
+ *    at "high", or has no shared memory to shed.
+ * 2. Binary search in [0, sharedMemPerBlock - allocUnit] for the largest
+ *    `mid` byte allocation whose occupancy tier exceeds the current tier.
+ *    `mid` is rounded down to the allocation granule (typically 256 bytes)
+ *    so the recommendation matches what the driver will actually allocate.
+ * 3. Return `{ margin: bytes-to-shed, nextClass, limitingSwitchesTo? }`.
+ *
+ * Returns `undefined` when no reduction within the [0, current-allocUnit]
+ * range improves the tier (e.g. registers are the real bottleneck).
+ *
+ * @param threadsPerBlock  Block size in threads
+ * @param sharedMemPerBlock  Per-block shared memory in bytes
+ * @param registersPerThread  Registers per thread
+ * @param spec  GPU architecture limits (defaults to Ampere)
+ * @returns `{ margin, nextClass, limitingSwitchesTo }` or undefined
+ */
+export function findSharedMemPressureMargin(
+  threadsPerBlock: number,
+  sharedMemPerBlock: number,
+  registersPerThread: number,
+  spec: GpuSpec = AMPERE_LIKE_DEFAULT
+): { margin: number; nextClass: string; limitingSwitchesTo: LimitName | undefined } | undefined {
+  const current = computeOccupancyBreakdown(
+    threadsPerBlock,
+    sharedMemPerBlock,
+    registersPerThread,
+    spec
+  );
+  const currentClass = classifyOccupancy(current.occupancy);
+  const currentRank = occupancyClassRank(currentClass);
+
+  if (
+    current.limiting_factor !== "shared_mem" ||
+    currentRank >= 2 ||
+    sharedMemPerBlock <= 0
+  ) {
+    return undefined;
+  }
+
+  const allocUnit = Math.max(1, spec.sharedMemAllocUnit);
+  // Search space: round `sharedMemPerBlock` down to the allocation granule
+  // and search [0, capStep - 1] (in granule units).  The trial value is
+  // `step * allocUnit`, ensuring all probes are valid driver allocations.
+  const capStep = Math.floor(sharedMemPerBlock / allocUnit);
+  if (capStep <= 0) {
+    return undefined;
+  }
+
+  let lo = 0;
+  let hi = capStep - 1;
+  let best: number | undefined;
+  let bestClass: string | undefined;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const trialBytes = mid * allocUnit;
+    const trial = computeOccupancyBreakdown(
+      threadsPerBlock,
+      trialBytes,
+      registersPerThread,
+      spec
+    );
+    const trialClass = classifyOccupancy(trial.occupancy);
+    const improved = occupancyClassRank(trialClass) > currentRank;
+    if (improved) {
+      best = trialBytes;
+      bestClass = trialClass;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  if (best === undefined || bestClass === undefined) {
+    return undefined;
+  }
+
+  const trialAtBest = computeOccupancyBreakdown(
+    threadsPerBlock,
+    best,
+    registersPerThread,
+    spec
+  );
+  const limitingSwitchesTo: LimitName | undefined =
+    trialAtBest.limiting_factor !== "shared_mem"
+      ? trialAtBest.limiting_factor
+      : undefined;
+
+  return {
+    margin: sharedMemPerBlock - best,
+    nextClass: bestClass,
+    limitingSwitchesTo,
+  };
+}
+
 export function analyzeKernel(
   threadsPerBlock: number,
   sharedMemPerBlock: number,
@@ -606,6 +746,13 @@ export function analyzeKernel(
     registersPerThread,
     spec
   );
+  // Gap 11: parallel margin for shared-memory-limited kernels.
+  const sharedMemMargin = findSharedMemPressureMargin(
+    threadsPerBlock,
+    sharedMemPerBlock,
+    registersPerThread,
+    spec
+  );
 
   return {
     gpu: g.name,
@@ -621,6 +768,9 @@ export function analyzeKernel(
     register_pressure_margin: registerMargin?.margin,
     next_occupancy_class: registerMargin?.nextClass,
     next_limiting_factor: registerMargin?.limitingSwitchesTo,
+    shared_mem_pressure_margin: sharedMemMargin?.margin,
+    next_occupancy_class_shared: sharedMemMargin?.nextClass,
+    next_limiting_factor_shared: sharedMemMargin?.limitingSwitchesTo,
     limiting_factor: bd.limiting_factor,
     blocks_per_sm: bd.blocks_per_sm,
     limits: {

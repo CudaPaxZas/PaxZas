@@ -500,8 +500,13 @@ export function gpuSpecFromArch(
  * Maps SM version numbers from NVIDIA to our compute capability keys.
  * SM version = last 2 or 3 digits from `.target sm_XX` directive.
  * Example: sm_80 -> 80 -> "8.0" (Ampere)
+ *
+ * Exported (Gap 9) so analyze.ts can normalise SASS targets and the resolved
+ * capability through the same mapping when classifying analysis_mode —
+ * `sm_87` (Jetson Orin) and `sm_86` (Ampere mobile) both resolve to cc 8.6
+ * and should therefore be treated as the same architecture.
  */
-const SM_VERSION_TO_CC: Partial<Record<number, GpuComputeCapabilityKey>> = {
+export const SM_VERSION_TO_CC: Partial<Record<number, GpuComputeCapabilityKey>> = {
   70: "7.0",  // Volta
   75: "7.5",  // Turing
   80: "8.0",  // Ampere
