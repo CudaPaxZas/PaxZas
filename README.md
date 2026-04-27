@@ -10,8 +10,8 @@ Static analysis of NVIDIA CUDA kernels directly inside VS Code — **no Python, 
 Every analysis runs against **all supported GPU presets in parallel**. A dropdown in the panel lets you switch results between architectures instantly — no re-running needed. Presets derived from actual SASS binary targets are marked as **native**; all others are **what-if estimates** using the same instruction profile with different SM limits.
 
 Low-level reference in `FEATURE_REFERENCE.md`:
-- [**Part 5 — Occupancy Model Synthesis**](FEATURE_REFERENCE.md#part-5--occupancy-model-synthesis) (GPU-spec-driven limits and per-architecture occupancy behavior)
-- [**Part 7 — Confidence Summary**](FEATURE_REFERENCE.md#part-7--confidence-summary) (confidence behavior across models)
+- [**Occupancy Model Synthesis**](FEATURE_REFERENCE.md#part-5--occupancy-model-synthesis) (GPU-spec-driven limits and per-architecture occupancy behavior)
+- [**Confidence Summary**](FEATURE_REFERENCE.md#part-7--confidence-summary) (confidence behavior across models)
 
 Supported architectures:
 
@@ -33,26 +33,26 @@ Supported architectures:
 - **Waste metrics** — unused threads, warps, registers, and shared bytes per SM at the current configuration
 - Register what-if: how many fewer registers to reach the next occupancy tier
 - Launch parameter inference from PTX hints and optional SASS register index
-- Low-level reference: [**Part 5 — Occupancy Model Synthesis**](FEATURE_REFERENCE.md#part-5--occupancy-model-synthesis)
+- Low-level reference: [**Occupancy Model Synthesis**](FEATURE_REFERENCE.md#part-5--occupancy-model-synthesis)
 
 ### Bottleneck Diagnosis
 - Fuses memory posture, stall profile, and pattern class into a **primary and secondary bottleneck** with the firing rule that triggered it
 - Four **stall profile** flags: memory dependency, memory throttle, local memory (register spill), sync overhead
 - Per-bottleneck optimization suggestions ranked by impact
-- Low-level reference: [**Part 8 — Diagnosis Layer (`diagnoseKernel`)**](FEATURE_REFERENCE.md#part-8--diagnosis-layer-diagnosekernel)
+- Low-level reference: [**Diagnosis Layer (`diagnoseKernel`)**](FEATURE_REFERENCE.md#part-8--diagnosis-layer-diagnosekernel)
 
 ### Memory Model
 - Classifies the kernel as **memory-bound** or **compute-friendly**
 - Arithmetic intensity (ops/byte), reuse ratio, cache policy, load/store balance and vectorization score
 - Distinguishes global, shared, and local (spill) traffic from SASS; falls back to PTX heuristics when SASS is absent
-- Low-level reference: [**Part 4 — Memory Model Synthesis**](FEATURE_REFERENCE.md#part-4--memory-model-synthesis) and [**Part 3 — Feature Fusion**](FEATURE_REFERENCE.md#part-3--feature-fusion-ptx--sass--model-inputs)
+- Low-level reference: [**Memory Model Synthesis**](FEATURE_REFERENCE.md#part-4--memory-model-synthesis) and [**Feature Fusion**](FEATURE_REFERENCE.md#part-3--feature-fusion-ptx--sass--model-inputs)
 
 ### Pattern Model
 - Classifies as `tiled`, `streaming`, `reduction`, `compute_heavy`, or mixed
 - Detects archetypes: `GEMM`, `CONV`, `ELEMENTWISE`, `STENCIL`, and others
 - **15 micro-flags**: register spill, uncoalesced loads/stores, atomic contention, missing tensor cores, SFU-heavy, over-synchronized, FP16 scalar, warp divergence, and more
 - Warp primitive detection: shuffle, vote, and reduction patterns
-- Low-level reference: [**Part 6 — Pattern Model Synthesis**](FEATURE_REFERENCE.md#part-6--pattern-model-synthesis) and [**Part 3 — Feature Fusion**](FEATURE_REFERENCE.md#part-3--feature-fusion-ptx--sass--model-inputs)
+- Low-level reference: [**Pattern Model Synthesis**](FEATURE_REFERENCE.md#part-6--pattern-model-synthesis) and [**Feature Fusion**](FEATURE_REFERENCE.md#part-3--feature-fusion-ptx--sass--model-inputs)
 
 ### Instruction Mix (SASS)
 - Category breakdown: arithmetic, tensor, SFU, global mem, shared mem, local mem, control/sync
@@ -60,17 +60,17 @@ Supported architectures:
 - Tensor core op counts (WMMA / HMMA)
 - Atomic and warp-primitive counts
 - Productive instruction fraction and tensor utilization fraction
-- Low-level reference: [**Part 2 — SASS Features**](FEATURE_REFERENCE.md#part-2--sass-features) (especially sections 2.1-2.9)
+- Low-level reference: [**SASS Features**](FEATURE_REFERENCE.md#part-2--sass-features) (especially sections 2.1-2.9)
 
 ### Roofline Chart
 - Plots the kernel's arithmetic intensity against the FP32 roof and bandwidth slope for the selected GPU
 - Region classification: **memory-bound** or **compute-bound** with a ridge-point marker
-- Low-level reference: [**Part 4 — Memory Model Synthesis**](FEATURE_REFERENCE.md#part-4--memory-model-synthesis) (bytes/flops and intensity derivation)
+- Low-level reference: [**Memory Model Synthesis**](FEATURE_REFERENCE.md#part-4--memory-model-synthesis) (bytes/flops and intensity derivation)
 
 ### Raw Feature Inspection
 - Side-by-side PTX vs SASS instruction counts for every extracted feature
 - Rows with differing values highlighted; column headers adapt to the available data source
-- Low-level reference: [**Part 1 — PTX Features**](FEATURE_REFERENCE.md#part-1--ptx-features), [**Part 2 — SASS Features**](FEATURE_REFERENCE.md#part-2--sass-features), and [**Part 3 — Feature Fusion**](FEATURE_REFERENCE.md#part-3--feature-fusion-ptx--sass--model-inputs)
+- Low-level reference: [**PTX Features**](FEATURE_REFERENCE.md#part-1--ptx-features), [**SASS Features**](FEATURE_REFERENCE.md#part-2--sass-features), and [**Feature Fusion**](FEATURE_REFERENCE.md#part-3--feature-fusion-ptx--sass--model-inputs)
 
 ---
 
