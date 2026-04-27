@@ -2,7 +2,7 @@
   "name": "paxzas-vscode",
   "displayName": "Paxzas CUDA Analyzer",
   "description": "Local PTX/SASS fast analysis inside VS Code (no Python, no network).",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "publisher": "CudaPaxZas",
   "repository": {
     "type": "git",
