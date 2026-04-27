@@ -2,6 +2,14 @@
 
 Static analysis of NVIDIA CUDA kernels directly inside VS Code — **no Python, no network, no GPU required**. Point it at a PTX or SASS file and get occupancy, memory posture, bottleneck diagnosis, and instruction mix instantly, across every GPU architecture from Volta to Blackwell.
 
+## Analyzing a `.sass` file
+
+1. Select your `.sass` disassembly in the Explorer (for example a CUDA fatbin dump such as `cudnn_cnn64_9.dll_*.sass`).
+2. Right-click the file and choose **Paxzas: Analyze CUDA File with Launch Spec** (same command is available from the Command Palette and editor title bar).
+3. Review the **Diagnosis** panel: pick a GPU preset, then use tabs like **Overview**, **Bottleneck**, **Stalls**, **Memory**, **Pattern**, and **Occupancy** (including warp-occupancy sweeps vs block size).
+
+![Right-click a .sass file, run Analyze CUDA File with Launch Spec, then inspect the Diagnosis panel](image.png)
+
 ---
 
 ## Features
