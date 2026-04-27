@@ -8,6 +8,8 @@ export interface MergeLaunchResult {
   threads: number;
   shared: number;
   registers: number;
+  /** Optional total thread blocks in the launch (I3 — SM util cap). */
+  gridBlocks?: number;
   hints: PtxKernelHints;
   registerSource: string;
   threadsSource: string;
@@ -17,7 +19,7 @@ export interface MergeLaunchResult {
 export function mergeLaunchWithHints(
   ptx: string,
   kernelSubstring: string | undefined,
-  launch: Partial<Record<"threads" | "shared" | "registers", number>>,
+  launch: Partial<Record<"threads" | "shared" | "registers" | "grid", number>>,
   sassRegisters: number | null | undefined
 ): MergeLaunchResult {
   const hints = parsePtxKernelHints(ptx, kernelSubstring);
@@ -61,10 +63,14 @@ export function mergeLaunchWithHints(
     sharedSource = "ptx.static_shared";
   }
 
+  const gridBlocks =
+    launch.grid !== undefined ? Math.floor(launch.grid) : undefined;
+
   return {
     threads: Math.floor(threads),
     shared: Math.floor(shared),
     registers: Math.floor(registers),
+    gridBlocks,
     hints,
     registerSource,
     threadsSource,

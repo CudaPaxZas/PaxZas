@@ -472,8 +472,16 @@ export interface KernelAnalysis extends Record<string, unknown> {
    * Gap 11: Human-readable device-level throughput estimate.
    * "N / M SMs active" when smCount is known; undefined otherwise.
    * Example: "54 / 108 SMs active" means 50% of the A100's SMs are busy.
+   * I3: when `analyzeKernel` receives `gridBlocks`, N is capped by that launch
+   * size so tiny grids cannot exceed concurrent block count.
    */
   estimated_sm_utilization: string | undefined;
+}
+
+/** Optional knobs for `analyzeKernel` (device / launch context). */
+export interface AnalyzeKernelOptions {
+  /** Total thread blocks in the launch; caps reported SM participation (I3). */
+  gridBlocks?: number;
 }
 
 function occupancyClassRank(cls: string): number {
@@ -703,7 +711,8 @@ export function analyzeKernel(
   threadsPerBlock: number,
   sharedMemPerBlock: number,
   registersPerThread: number,
-  spec: GpuSpec = AMPERE_LIKE_DEFAULT
+  spec: GpuSpec = AMPERE_LIKE_DEFAULT,
+  opts?: AnalyzeKernelOptions
 ): KernelAnalysis {
   const bd = computeOccupancyBreakdown(
     threadsPerBlock,
@@ -822,7 +831,21 @@ export function analyzeKernel(
     // When smCount is not known (SASS-only without nvidia-smi), return undefined.
     estimated_sm_utilization:
       g.smCount !== undefined
-        ? `${Math.round(warpOccupancy * g.smCount)} / ${g.smCount} SMs active`
+        ? (() => {
+            const idealSms = Math.round(warpOccupancy * g.smCount);
+            const rawGrid = opts?.gridBlocks;
+            const gridCap =
+              rawGrid !== undefined &&
+              Number.isFinite(rawGrid) &&
+              rawGrid >= 0
+                ? Math.floor(rawGrid)
+                : undefined;
+            const displayed =
+              gridCap !== undefined ? Math.min(idealSms, gridCap) : idealSms;
+            const gridNote =
+              gridCap !== undefined ? `; grid≤${gridCap} blocks` : "";
+            return `${displayed} / ${g.smCount} SMs active${gridNote}`;
+          })()
         : undefined,
   };
 }

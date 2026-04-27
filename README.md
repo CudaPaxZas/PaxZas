@@ -38,16 +38,19 @@ When direct SM-count telemetry is unavailable, auto-mode also uses curated GPU-n
 - Register what-if: how many fewer registers to reach the next occupancy tier
 - Register margin recommendations are aligned to real per-warp register allocation granularity (actionable `__launch_bounds__` targets)
 - **Shared-memory what-if** — when shared memory is the limiting factor, an actionable "shed N bytes/block to reach next tier" recommendation is offered (parallel to the register-side margin)
-- Launch parameter inference from PTX hints and optional SASS register index
+- Launch parameter inference from PTX hints and optional SASS register index; optional **`grid=`** hint caps the device-level “SMs active” string when `smCount` is known (tiny launches cannot occupy more SMs than blocks)
+- **SASS-only files** accept the same launch overrides (`threads`, `shared`, `regs`, `grid`) instead of silently fixing only threads/shared defaults
 - Low-level reference: [**Occupancy Model Synthesis**](FEATURE_REFERENCE.md#part-5--occupancy-model-synthesis)
 
 ### Bottleneck Diagnosis
+- The legacy **`heuristicBottleneck`** label now consumes optional SASS features (same FLOP/byte weighting as the memory model) so it does not disagree with memory class on SASS-only or supplemental-SASS runs
 - Fuses memory posture, stall profile, and pattern class into a **primary and secondary bottleneck** with the firing rule that triggered it
 - Four **stall profile** flags: memory dependency, memory throttle, local memory (register spill), sync overhead
 - Per-bottleneck optimization suggestions ranked by impact
 - Low-level reference: [**Diagnosis Layer (`diagnoseKernel`)**](FEATURE_REFERENCE.md#part-8--diagnosis-layer-diagnosekernel)
 
 ### Memory Model
+- **Integer-only SASS ALU (I9)** — when weighted FLOPs from `arithmetic_ops`/tensor/SFU/FP64 are all zero but `integer_ops > 0` (e.g. `ISCADD`-heavy code), the SASS FLOP proxy falls back to `integer_ops×2` so empty-PTX + SASS paths are not mis-read as zero compute
 - Classifies the kernel as **memory-bound** or **compute-friendly**
 - Arithmetic intensity (ops/byte), reuse ratio, cache policy, load/store balance and vectorization score
 - **Sub-32-bit precision aware** — `LDG.E.U16` / `LDG.E.U8` (FP16, BF16, INT8 / FP8) and their store counterparts are costed at their true 2-byte / 1-byte widths, not the legacy 4-byte fallback
@@ -57,6 +60,7 @@ When direct SM-count telemetry is unavailable, auto-mode also uses curated GPU-n
 - Low-level reference: [**Memory Model Synthesis**](FEATURE_REFERENCE.md#part-4--memory-model-synthesis) and [**Feature Fusion**](FEATURE_REFERENCE.md#part-3--feature-fusion-ptx--sass--model-inputs)
 
 ### Pattern Model
+- **Ratio semantics (I1)** — `shared_to_global` and `compute_to_memory` treat “divide by zero global ops” as unbounded reuse / compute (exported as a large finite sentinel for JSON safety), instead of collapsing to `0`
 - Classifies as `tiled`, `streaming`, `reduction`, `compute_heavy`, or mixed
 - Detects archetypes: `GEMM`, `CONV`, `ELEMENTWISE`, `STENCIL`, and others
 - **15 micro-flags**: register spill, uncoalesced loads/stores, atomic contention, missing tensor cores, SFU-heavy, over-synchronized, FP16 scalar, warp divergence, and more
@@ -95,7 +99,7 @@ When direct SM-count telemetry is unavailable, auto-mode also uses curated GPU-n
 | Command | Description |
 |---------|-------------|
 | **Paxzas: Kernel Analysis** | Opens the full 10-tab analysis panel |
-| **Paxzas: Analyze CUDA File with Launch Spec** | Same analysis with optional `threads=…,shared=…,regs=…` overrides |
+| **Paxzas: Analyze CUDA File with Launch Spec** | Same analysis with optional `threads=…,shared=…,regs=…,grid=…` overrides (grid caps the SM-util estimate when device SM count is known) |
 
 Both commands are available from the **Command Palette**, **editor title bar**, **editor right-click**, and **Explorer right-click** on `.ptx`, `.cu`, and `.sass` files.
 

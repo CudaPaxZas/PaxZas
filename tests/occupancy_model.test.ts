@@ -64,6 +64,27 @@ describe("occupancy_model (Python parity)", () => {
     expect(out.confidence).toBeLessThanOrEqual(1.0);
   });
 
+  it("merge_launch_passes_grid_hint_I3", () => {
+    const ptx =
+      PTX_HEAD +
+      `
+.visible .entry _Z8occ_high(
+  .maxntid 128, 1, 1
+)
+{
+  .shared .align 16 .b8 pool[4096];
+  ret;
+}
+`;
+    const sass = ["Function : _Z8occ_high", "    /*0100*/ LDG.E.32 R63, [R2];"].join(
+      "\n"
+    );
+    const kernel = "_Z8occ_high";
+    const sassRegs = inferRegsFromSass(sass, kernel);
+    const merged = mergeLaunchWithHints(ptx, kernel, { threads: 128, grid: 24 }, sassRegs);
+    expect(merged.gridBlocks).toBe(24);
+  });
+
   it("low_class_case", () => {
     const ptx =
       PTX_HEAD +
@@ -227,6 +248,13 @@ describe("occupancy_model — gap fixes", () => {
     const ka = analyzeKernel(256, 0, 32, specWith108);
     expect(ka.estimated_sm_utilization).toBeDefined();
     expect(ka.estimated_sm_utilization).toMatch(/\d+ \/ 108 SMs active/);
+  });
+
+  it("estimated_sm_utilization_caps_by_grid_blocks_I3", () => {
+    const spec = { ...AMPERE_LIKE_DEFAULT, smCount: 108 };
+    const ka = analyzeKernel(256, 0, 32, spec, { gridBlocks: 4 });
+    expect(ka.estimated_sm_utilization).toContain("4 / 108 SMs active");
+    expect(ka.estimated_sm_utilization).toContain("grid≤4");
   });
 
   it("estimated_sm_utilization_undefined_without_smcount", () => {

@@ -46,6 +46,14 @@ describe("sass_features (Python parity shape)", () => {
     expect(regs!).toBeGreaterThanOrEqual(1);
   });
 
+  it("infer_registers_accepts_precomputed_features_I7", () => {
+    const text = inlineSassFixture(KERNEL);
+    const [, pre] = extractSassFeatures(text, KERNEL);
+    expect(inferRegistersPerThreadFromSass(text, KERNEL, pre)).toBe(
+      inferRegistersPerThreadFromSass(text, KERNEL)
+    );
+  });
+
   it("detects multiple architecture targets in fatbin-style SASS text", () => {
     const text = [
       "Fatbin elf code:",

@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { analyzeMemory } from "../src/analyzer/memory_model";
+import { emptyInstructionFeatures } from "../src/analyzer/ptx_features";
 import {
   PTX_HEAD,
   featuresFromPtx,
@@ -105,6 +106,27 @@ describe("memory_model (Python parity)", () => {
     expect(out.cache_policy).toBeNull();
     expect(out.confidence).toBeGreaterThanOrEqual(0.8);
     expect(out.class).toBe("reuse_optimized");
+  });
+});
+
+describe("memory_model — I9 integer-only SASS FLOPs", () => {
+  it("restores_flops_proxy_when_integer_ops_but_no_arithmetic_ops", () => {
+    let a = 0x100;
+    const lines = ["Function : _ZintOnly", ""];
+    for (let i = 0; i < 8; i++) {
+      lines.push(`${sassHx(a)} LDG.E.32 R0, [R2];`);
+      a += 0x10;
+    }
+    for (let i = 0; i < 6; i++) {
+      lines.push(`${sassHx(a)} ISCADD R4, R5, 1;`);
+      a += 0x10;
+    }
+    const sass = featuresFromSass(lines.join("\n"), undefined);
+    expect(sass.arithmetic_ops).toBe(0);
+    expect(sass.integer_ops).toBeGreaterThan(0);
+    const out = analyzeMemory(emptyInstructionFeatures(), sass);
+    expect(out.flops_proxy).toBeGreaterThan(0);
+    expect(out.sass_flops_proxy).toBeGreaterThan(0);
   });
 });
 

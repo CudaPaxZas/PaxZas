@@ -662,6 +662,34 @@ describe("pattern_model — inefficiency signals", () => {
   });
 });
 
+describe("pattern_model — I1 infinite ratios (JSON sentinel)", () => {
+  it("compute_to_memory_ratio_sentinel_when_sass_has_compute_but_no_global", () => {
+    const lines = [
+      "Function : _Z0cmpOnly",
+      "",
+      "    /*0100*/ FFMA.FTZ R0, R1, R2, R3;",
+    ];
+    const sass = featuresFromSass(lines.join("\n"), undefined);
+    const ptxMod =
+      PTX_HEAD +
+      `\n.visible .entry _Z0cmpOnly(.param .u64 p) { .reg .f32 %f<4>; ret; }\n`;
+    const ptx = featuresFromPtx(ptxMod, "_Z0cmpOnly");
+    const out = analyzePattern(ptx, sass);
+    expect(out.compute_to_memory_ratio).toBe(1e12);
+  });
+
+  it("shared_to_global_ratio_sentinel_when_shared_without_global", () => {
+    const lines = ["Function : _Z0shOnly", "", "    /*0100*/ LDS.128 R8, [R4];"];
+    const sass = featuresFromSass(lines.join("\n"), undefined);
+    const ptxMod =
+      PTX_HEAD +
+      `\n.visible .entry _Z0shOnly(.param .u64 p) { .reg .f32 %f<4>; ret; }\n`;
+    const ptx = featuresFromPtx(ptxMod, "_Z0shOnly");
+    const out = analyzePattern(ptx, sass);
+    expect(out.shared_to_global_ratio).toBe(1e12);
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // New pattern signals: atomic_contention_risk / sfu_heavy / vectorization_score
 //                      over_synchronized / fp16_scalar_risk / read_modify_write

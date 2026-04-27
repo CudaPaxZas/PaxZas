@@ -21,6 +21,7 @@ import {
   isComputeOpcode,
   isMemoryOpcode,
   observeSassOpcodeForPatternMetrics,
+  safeDivInf,
 } from "../src/analyzer/opcode_kinds";
 
 describe("opcode_kinds — isMemoryOpcode (Gap 3 modern memory ops)", () => {
@@ -127,6 +128,21 @@ describe("opcode_kinds — isComputeOpcode (Gap 4 expansion)", () => {
     expect(isComputeOpcode("SHFL.SYNC.IDX")).toBe(false);
     expect(isComputeOpcode("VOTE.SYNC.ALL")).toBe(false);
     expect(isComputeOpcode("ATOM.E.ADD")).toBe(false);
+  });
+});
+
+describe("opcode_kinds — safeDivInf (I1)", () => {
+  it("returns_infinity_when_denominator_zero_and_numerator_positive", () => {
+    expect(safeDivInf(3, 0)).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("returns_zero_when_denominator_zero_and_numerator_non_positive", () => {
+    expect(safeDivInf(0, 0)).toBe(0);
+    expect(safeDivInf(-1, 0)).toBe(0);
+  });
+
+  it("matches_normal_division_when_denominator_nonzero", () => {
+    expect(safeDivInf(6, 2)).toBe(3);
   });
 });
 

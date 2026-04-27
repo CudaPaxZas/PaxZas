@@ -151,7 +151,7 @@ function formatSummary(r: AnalyzerReport, meta?: { path?: string; ms?: number })
 export async function runAnalysisOnText(
   text: string,
   displayPath: string,
-  launch?: Partial<Record<"threads" | "shared" | "registers", number>>,
+  launch?: Partial<Record<"threads" | "shared" | "registers" | "grid", number>>,
   supplementalSass?: string
 ): Promise<void> {
   const t0 = Date.now();
@@ -309,8 +309,8 @@ export function activate(context: vscode.ExtensionContext): void {
       async (uri?: vscode.Uri) => {
         const spec = await vscode.window.showInputBox({
           prompt:
-            "Optional launch: threads=N,shared=N,regs=N (comma-separated)",
-          placeHolder: "threads=128,shared=0,regs=32",
+            "Optional launch: threads=N,shared=N,regs=N,grid=N (comma-separated)",
+          placeHolder: "threads=128,shared=0,regs=32,grid=1024",
           ignoreFocusOut: true,
         });
         if (spec === undefined) {
@@ -643,8 +643,9 @@ async function runKernelDiagnosisCommand(
 
 function parseLaunchSpec(
   raw: string
-): Partial<Record<"threads" | "shared" | "registers", number>> {
-  const out: Partial<Record<"threads" | "shared" | "registers", number>> = {};
+): Partial<Record<"threads" | "shared" | "registers" | "grid", number>> {
+  const out: Partial<Record<"threads" | "shared" | "registers" | "grid", number>> =
+    {};
   const parts = raw.split(/[,;]/);
   for (const part of parts) {
     const m = part.trim().match(/^(\w+)\s*=\s*(\d+)/i);
@@ -659,6 +660,8 @@ function parseLaunchSpec(
       out.shared = v;
     } else if (k === "regs" || k === "registers" || k === "r") {
       out.registers = v;
+    } else if (k === "grid" || k === "blocks" || k === "g") {
+      out.grid = v;
     }
   }
   return out;

@@ -85,6 +85,38 @@ function estimateSassBytes(
   );
 }
 
+/** SASS byte proxy using typed LDG/STG widths (same rule as `analyzeMemory`). */
+export function sassBytesProxyFromFeatures(
+  sass: SassInstructionFeatures,
+  defaultBytesPerOp = 4
+): number {
+  return estimateSassBytes(sass, defaultBytesPerOp);
+}
+
+/**
+ * SASS FLOP proxy aligned with `analyzeMemory` (tensor/SFU/FP64 weighting).
+ * Exported for `heuristicBottleneck` parity (I11).
+ */
+export function sassFlopsProxyFromFeatures(sass: SassInstructionFeatures): number {
+  const sassScalarFlops = sass.arithmetic_ops * 2;
+  const sassTensorFpFlops = sass.wmma_ops * 512;
+  const sassTensorIntFlops = (sass.tensor_ops - sass.wmma_ops) * 64;
+  const sassSfuFlops = sass.sfu_ops * 4;
+  const sassFp64Penalty = sass.fp64_arith_ops * 14;
+  let proxy =
+    sassScalarFlops +
+    sassTensorFpFlops +
+    sassTensorIntFlops +
+    sassSfuFlops +
+    sassFp64Penalty;
+  // I9: ISCADD / ICMP / … bump `integer_ops` but not `arithmetic_ops`; with empty
+  // PTX the max(ptx, sass) path would leave flops_proxy at 0 and skew classification.
+  if (proxy === 0 && sass.integer_ops > 0) {
+    proxy = sass.integer_ops * 2;
+  }
+  return proxy;
+}
+
 /**
  * Complete memory analysis result for a kernel.
  *
@@ -207,41 +239,8 @@ export function analyzeMemory(
     sassGlobalStores = sassFeatures.global_stores;
     sassSharedLoads = sassFeatures.shared_loads;
     sassSharedStores = sassFeatures.shared_stores;
-    // Gap 1 (FLOP proxy): Fix tensor FLOP proxy.  The original formula used
-    // `2 × tensor_ops` which gives ~2 FLOPs/instruction — correct for scalar
-    // FP32 FFMA but wildly wrong for tensor ops.  A single HMMA.16816.F16
-    // performs a 16×16×16 matrix MAC across a warp = 8192 FLOPs; the
-    // per-instruction approximation is 512 (a widely-used practical figure).
-    // Integer/binary MMA (IMMA/BMMA) uses 64 as a conservative floor.
-    //
-    // Gap 2 (SFU): MUFU.* instructions (sinf/cosf/expf/…) are real arithmetic
-    // work (~4 float-op equivalents each) but were excluded from the FLOP
-    // estimate, causing SFU-heavy kernels (sigmoid, GELU, rendering BVH) to
-    // appear falsely memory-bound.
-    //
-    // Gap 1 (FP64 weighting): scalar FP64 ops (DFMA / DADD / DMUL …) are now
-    // counted in `arithmetic_ops` so they contribute 2 FLOPs each like FFMA.
-    // However, per-instruction *cost* on consumer GPUs is up to 32× higher
-    // than FP32 (HPC-class GPUs are closer to 2×).  To reflect that FP64
-    // kernels are far more compute-bound than the raw FLOP count suggests,
-    // we add an extra `fp64_arith_ops × 14` term.  Each DFMA therefore weighs
-    // 16 effective FLOPs: 2 (raw) + 14 (cost penalty) — a middle-ground
-    // multiplier that prevents FP64 CFD/MD kernels from being mis-classified
-    // as memory-bound while not over-stating compute for HPC-class GPUs.
-    const sassScalarFlops    = sassFeatures.arithmetic_ops * 2;
-    const sassTensorFpFlops  = sassFeatures.wmma_ops * 512;
-    const sassTensorIntFlops =
-      (sassFeatures.tensor_ops - sassFeatures.wmma_ops) * 64;
-    const sassSfuFlops       = sassFeatures.sfu_ops * 4;
-    const sassFp64Penalty    = sassFeatures.fp64_arith_ops * 14;
-    sassFlopsProxy =
-      sassScalarFlops +
-      sassTensorFpFlops +
-      sassTensorIntFlops +
-      sassSfuFlops +
-      sassFp64Penalty;
-    // Detailed byte estimation from SASS load/store variant info
-    sassBytesProxy = estimateSassBytes(sassFeatures, bytesPerMemOp);
+    sassFlopsProxy = sassFlopsProxyFromFeatures(sassFeatures);
+    sassBytesProxy = sassBytesProxyFromFeatures(sassFeatures, bytesPerMemOp);
   }
 
   // Prefer SASS data when available (more accurate), fall back to PTX estimates

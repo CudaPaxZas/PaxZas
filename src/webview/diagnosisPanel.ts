@@ -74,8 +74,8 @@ export interface DiagnosisPayload {
     over_synchronized: boolean;
     fp16_scalar_risk: boolean;
     read_modify_write: boolean;
-    tensor_utilization_fraction: number;
-    productive_instruction_fraction: number;
+    tensor_utilization_fraction: number | undefined;
+    productive_instruction_fraction: number | undefined;
     warp_divergence_risk: boolean;
     uses_warp_shuffle: boolean;
     uses_warp_vote: boolean;

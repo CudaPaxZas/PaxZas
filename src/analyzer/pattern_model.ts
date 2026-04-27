@@ -49,7 +49,7 @@
 
 import type { PtxInstructionFeatures } from "./ptx_features";
 import type { SassInstructionFeatures } from "./sass_features";
-import { safeDiv } from "./opcode_kinds";
+import { safeDiv, safeDivInf } from "./opcode_kinds";
 
 /**
  * Complete pattern analysis result for a kernel.
@@ -182,7 +182,8 @@ export interface PatternResult {
  * 6. Boost confidence if SASS data available
  *
  * Key metrics:
- * - compute_to_memory = FLOPs / global_mem_ops (threshold ~2-4 distinguishes patterns)
+ * - compute_to_memory = compute_ops / (global_ops + 1), or +∞ when global_ops = 0
+ *   with compute_ops > 0 (I1); exported as a large finite sentinel for JSON.
  * - branch_density = branches / compute_ops (threshold ~0.1 for control-heavy)
  * - barrier_density = barriers / compute_ops (threshold ~0.02 for sync-heavy)
  * - work_per_barrier = compute / barriers (efficiency metric: how much work between syncs)
@@ -198,6 +199,19 @@ export interface PatternResult {
  * @param sassFeatures Low-level SASS instruction counts (more accurate, optional)
  * @returns Pattern classification with metrics and confidence
  */
+const RATIO_INF_SENTINEL = 1e12;
+
+/** Rounds finite ratios to 6 dp; maps ±∞ to a JSON-safe sentinel (I1). */
+function ratioForReport(x: number): number {
+  if (x === Number.POSITIVE_INFINITY) {
+    return RATIO_INF_SENTINEL;
+  }
+  if (x === Number.NEGATIVE_INFINITY) {
+    return -RATIO_INF_SENTINEL;
+  }
+  return Math.round(x * 1e6) / 1e6;
+}
+
 export function analyzePattern(
   ptxFeatures: PtxInstructionFeatures,
   sassFeatures?: SassInstructionFeatures
@@ -251,10 +265,15 @@ export function analyzePattern(
     sassFeatures !== undefined && sassFeatures.tensor_ops > 0;
 
   // Key ratio metrics for pattern classification
-  const sharedToGlobal = safeDiv(sharedOps, globalOps);  // Reuse effectiveness
+  // I1: pure shared traffic with zero global ops is infinite reuse, not 0.
+  const sharedToGlobal = safeDivInf(sharedOps, globalOps);  // Reuse effectiveness
   const branchDensity = safeDiv(branches, computeOps + 1);  // Branch frequency vs compute
   const branchPerMem = safeDiv(branches, globalOps + 1);  // Branch intensity vs memory
-  const computeToMemory = safeDiv(computeOps, globalOps + 1);  // Primary classifier
+  // I1: zero global ops with compute ⇒ +∞ (compute-heavy / no global I/O), not computeOps/1.
+  const computeToMemory =
+    globalOps === 0 && computeOps > 0
+      ? Number.POSITIVE_INFINITY
+      : safeDiv(computeOps, globalOps + 1);  // Primary classifier
 
   // Boolean flags for micro-patterns
   const hasShared = sharedOps > 0;
@@ -750,12 +769,12 @@ export function analyzePattern(
     barriers,
     branches,
     loops,
-    shared_to_global_ratio: Math.round(sharedToGlobal * 1e6) / 1e6,
+    shared_to_global_ratio: ratioForReport(sharedToGlobal),
     branch_density: Math.round(branchDensity * 1e6) / 1e6,
     branch_per_global_mem_op: Math.round(branchPerMem * 1e6) / 1e6,
     barrier_density: Math.round(barrierDensity * 1e6) / 1e6,
     work_per_barrier: Math.round(workPerBarrier * 1e6) / 1e6,
-    compute_to_memory_ratio: Math.round(computeToMemory * 1e6) / 1e6,
+    compute_to_memory_ratio: ratioForReport(computeToMemory),
     uses_tensor_cores: usesTensor,
     streaming: isStreaming,
     sync_efficiency: syncEfficiency,

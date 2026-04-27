@@ -696,9 +696,11 @@ export function buildSassFeatureBundle(
 
 export function inferRegistersPerThreadFromSass(
   sassText: string,
-  kernelSubstring: string | undefined
+  kernelSubstring: string | undefined,
+  /** When the caller already ran `extractSassFeatures`, pass it to skip a second scan (I7). */
+  precomputed?: SassInstructionFeatures
 ): number | undefined {
-  const [, instr] = extractSassFeatures(sassText, kernelSubstring);
+  const instr = precomputed ?? extractSassFeatures(sassText, kernelSubstring)[1];
   if (instr.max_register_index < 0) {
     return undefined;
   }

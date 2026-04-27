@@ -101,7 +101,7 @@ function hintsToPublic(h: PtxKernelHints | null): AnalyzerReport["ptx_hints"] {
  */
 export async function analyze(
   text: string,
-  launch: Partial<Record<"threads" | "shared" | "registers", number>> = {},
+  launch: Partial<Record<"threads" | "shared" | "registers" | "grid", number>> = {},
   kernelSubstring: string | undefined = undefined,
   supplementalSass: string | undefined = undefined,
   gpuPreset = "auto"
@@ -173,11 +173,28 @@ export async function analyze(
 
   if (sassText && !hasPtxEntry(text)) {
     const instr = emptyInstructionFeatures();
-    const registers = sassRegisters ?? 32;
-    const threads = 256;
-    const shared = 0;
-    const kernel = analyzeKernel(threads, shared, registers, spec);
-    const bottleneck = heuristicBottleneck(instr, registers);
+    const threads = launch.threads ?? 256;
+    const shared = launch.shared ?? 0;
+    const registers = launch.registers ?? sassRegisters ?? 32;
+    const gridOpts =
+      launch.grid !== undefined &&
+      Number.isFinite(launch.grid) &&
+      launch.grid >= 0
+        ? { gridBlocks: Math.floor(launch.grid) }
+        : undefined;
+    const hadLaunchHints =
+      launch.threads !== undefined ||
+      launch.shared !== undefined ||
+      launch.registers !== undefined ||
+      launch.grid !== undefined;
+    const kernel = analyzeKernel(threads, shared, registers, spec, gridOpts);
+    const bottleneck = heuristicBottleneck(
+      instr,
+      registers,
+      undefined,
+      undefined,
+      sassInstr
+    );
     const { occModel, memory, pattern } = await runModelsParallelOrSync({
       threads,
       shared,
@@ -215,8 +232,9 @@ export async function analyze(
       bottleneck_heuristic: bottleneck,
       kernel,
       diagnosis: memory && pattern ? diagnoseKernel(memory, kernel, pattern) : undefined,
-      sass_note:
-        "SASS-only file: occupancy uses threads=256, shared=0 (Python pipeline normally requires PTX for launch merge).",
+      sass_note: hadLaunchHints
+        ? `SASS-only: occupancy uses launch hints (threads=${threads}, shared=${shared}, registers=${registers}${gridOpts ? `, grid≤${gridOpts.gridBlocks} blocks` : ""}).`
+        : "SASS-only: no launch hints — occupancy uses synthetic defaults threads=256, shared=0, registers from SASS or 32.",
     };
   }
 
@@ -234,13 +252,22 @@ export async function analyze(
     const feat = buildFeatureBundle(merged.registers, instr);
     const multi = kernelNames.length > 1;
 
+    const kernelOpts =
+      merged.gridBlocks !== undefined ? { gridBlocks: merged.gridBlocks } : undefined;
     const kernel = analyzeKernel(
       merged.threads,
       merged.shared,
       merged.registers,
-      spec
+      spec,
+      kernelOpts
     );
-    const bottleneck = heuristicBottleneck(instr, merged.registers);
+    const bottleneck = heuristicBottleneck(
+      instr,
+      merged.registers,
+      undefined,
+      undefined,
+      sassInstr
+    );
     const { occModel, memory, pattern } = await runModelsParallelOrSync({
       threads: merged.threads,
       shared: merged.shared,

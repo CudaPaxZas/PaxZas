@@ -87,6 +87,18 @@ export function safeDiv(n: number, d: number): number {
   return n / d;
 }
 
+/**
+ * Like `safeDiv`, but when the denominator is zero and the numerator is
+ * strictly positive, returns `+Infinity` instead of 0 so callers can tell
+ * "unbounded ratio" apart from "no signal" (I1 — pattern_model reuse ratios).
+ */
+export function safeDivInf(n: number, d: number): number {
+  if (d === 0) {
+    return n > 0 ? Number.POSITIVE_INFINITY : 0;
+  }
+  return n / d;
+}
+
 export interface InterleaveStreamState {
   prevKind: string | undefined;
   transitions: number;

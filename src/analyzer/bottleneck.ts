@@ -4,6 +4,8 @@
 
 import type { PtxInstructionFeatures } from "./ptx_features";
 import { bytesHeuristic, flopsHeuristic } from "./ptx_features";
+import type { SassInstructionFeatures } from "./sass_features";
+import { sassBytesProxyFromFeatures, sassFlopsProxyFromFeatures } from "./memory_model";
 
 export type BottleneckLabel = "memory-bound" | "compute-bound" | "balanced" | "unknown";
 
@@ -19,11 +21,28 @@ export function heuristicBottleneck(
   features: PtxInstructionFeatures,
   registersPerThread: number,
   intensityThreshold = 8.0,
-  highRegPressure = 64
+  highRegPressure = 64,
+  sassFeatures?: SassInstructionFeatures
 ): BottleneckResult {
-  const flops = flopsHeuristic(features);
-  const memOps = features.global_loads + features.global_stores;
-  const bytesMoved = bytesHeuristic(features);
+  const ptxFlops = flopsHeuristic(features);
+  const ptxBytes = bytesHeuristic(features);
+  const ptxMem = features.global_loads + features.global_stores;
+
+  const sassMem =
+    sassFeatures !== undefined
+      ? sassFeatures.global_loads + sassFeatures.global_stores
+      : 0;
+  const sassFlops =
+    sassFeatures !== undefined ? sassFlopsProxyFromFeatures(sassFeatures) : 0;
+
+  const flops = Math.max(ptxFlops, sassFlops);
+  const bytesMoved =
+    sassFeatures !== undefined && sassMem > 0
+      ? sassBytesProxyFromFeatures(sassFeatures)
+      : ptxBytes;
+
+  const memOps = sassMem > 0 ? sassMem : ptxMem;
+
   let bottleneck: BottleneckLabel;
   let intensity: number;
 
@@ -47,6 +66,12 @@ export function heuristicBottleneck(
   const notes: string[] = [];
   if (registersPerThread >= highRegPressure) {
     notes.push("high_register_pressure");
+  }
+  if (sassFeatures !== undefined && sassFlops > ptxFlops) {
+    notes.push("sass_flops_proxy");
+  }
+  if (sassFeatures !== undefined && sassMem > 0) {
+    notes.push("sass_global_bytes_proxy");
   }
   if (features.fma > memOps && memOps > 0) {
     notes.push("fma_heavy_vs_global_mem_ops");

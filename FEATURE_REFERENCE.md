@@ -64,6 +64,11 @@ extractSassFeatures(sassText, kernelSubstring?)
 
 Stops at the next `Function:` header so only one kernel section is processed.
 
+`inferRegistersPerThreadFromSass(sassText, kernelSubstring?, precomputed?)` maps
+`max_register_index + 1` to a register count.  When `precomputed` is the
+`SassInstructionFeatures` object already returned from `extractSassFeatures`, the
+helper skips a second full scan (I7).
+
 ---
 
 ### 2.1 Global Memory
@@ -227,7 +232,7 @@ consumes it.
 | `loops` | — | `ptx.loops` (always PTX — SASS has no loop semantics) | Pattern |
 | `compute_ops` | `sass.arithmetic_ops + sass.tensor_ops` | `ptx.fma + ptx.add + ptx.mul` | Memory, Pattern |
 | `bytes_moved` | `estimateSassBytes()` (typed widths, **including 2-byte and 1-byte sub-32-bit loads/stores**) | `(loads + stores) × 4` | Memory |
-| `flops_proxy` | `scalar×2 + wmma×512 + intMMA×64 + sfu×4 + fp64×14` | `fma×2 + add + mul` | Memory |
+| `flops_proxy` | `scalar×2 + wmma×512 + intMMA×64 + sfu×4 + fp64×14`; if that sum is **0** but `integer_ops > 0`, falls back to `integer_ops×2` (I9 — ISCADD-style ALU not in `arithmetic_ops`) | `fma×2 + add + mul` | Memory |
 | `registers_per_thread` | `sass.max_register_index + 1` | `ptx.maxnreg` hint or launch param | Occupancy |
 | `threads_per_block` | — | `ptx.maxntid` hint or launch param | Occupancy |
 | `shared_mem_per_block` | — | `ptx.static_shared` (bytes, typed element size applied) or launch param | Occupancy |
@@ -347,6 +352,16 @@ Previously a single `.CG` load suppressed the streaming classification on a kern
 
 > **Why `compute_source` uses presence, not count:** A pure-memory or control-flow SASS kernel legitimately has zero arithmetic operations.  Reporting `"ptx"` in that case would be incorrect — no PTX compute data was consulted.  The rule is: *if SASS was the source, say so*, even when its arithmetic count is zero.
 
+### Step 4c — Legacy `heuristicBottleneck` (I11)
+
+`heuristicBottleneck(ptxFeatures, registers, …, sassFeatures?)` mirrors the memory
+model when SASS is present: FLOPs use `sassFlopsProxyFromFeatures`, and when SASS
+reports global loads or stores, bytes use `sassBytesProxyFromFeatures` and
+`global_mem_ops` uses the SASS global-op tally.  This keeps the quick
+memory-bound / compute-bound label aligned with `MemoryAnalysis` on SASS-rich
+inputs.  Notes added: `sass_flops_proxy` (when SASS FLOPs exceed PTX FLOPs) and
+`sass_global_bytes_proxy` (when SASS global ops are present).
+
 ### Step 5 — Confidence scoring
 
 | Condition | Effect |
@@ -365,9 +380,12 @@ Previously a single `.CG` load suppressed the streaming classification on a kern
 
 ## Part 5 — Occupancy Model Synthesis
 
-**Entry point:** `analyzeKernel(threadsPerBlock, sharedMemPerBlock, registersPerThread, spec)`
+**Entry point:** `analyzeKernel(threadsPerBlock, sharedMemPerBlock, registersPerThread, spec, opts?)`
 
-The three inputs are themselves synthesized by `mergeLaunchWithHints()` using a
+Optional `opts.gridBlocks` caps `estimated_sm_utilization` when the launch has
+fewer thread blocks than the occupancy-derived SM participation (I3).
+
+The first three inputs are themselves synthesized by `mergeLaunchWithHints()` using a
 priority waterfall:
 
 ### Step 1 — Launch parameter resolution (`mergeLaunchWithHints`)
@@ -377,6 +395,9 @@ priority waterfall:
 | `registers_per_thread` | Explicit `--launch regs=` | `ptx.maxnreg` hint (line-anchored regex — ignores `//` comments) | `sass.max_register_index + 1` |
 | `threads_per_block` | Explicit `--launch threads=` | `ptx.maxntid` hint (line-anchored, same rule) | — (required) |
 | `shared_mem_per_block` | Explicit `--launch shared=` | `ptx.static_shared` bytes (element count × byte-width of declared type) | 0 |
+| `gridBlocks` (optional) | Explicit `--launch grid=` or VS Code `grid=…` in launch spec | — | — |
+
+`gridBlocks` is forwarded only to `analyzeKernel` for the SM-util string; it does not change occupancy math.
 
 Source labels (`"launch"`, `"ptx.maxntid"`, `"ptx.maxnreg"`, `"ptx.static_shared"`,
 `"sass.inferred"`) are carried forward into `OccupancyModelResult.sources` for
@@ -442,11 +463,13 @@ The margin is quantized to the hardware allocation granularity `regAllocUnitPerW
 When `GpuSpec.smCount` is known (from nvidia-smi or preset):
 
 ```
-estimated_sm_utilization = round(occupancy × smCount) + " / " + smCount + " SMs active"
+idealSms = round(occupancy × smCount)
+displayedSms = min(idealSms, gridBlocks)   when opts.gridBlocks is a finite non‑negative integer
+estimated_sm_utilization = displayedSms + " / " + smCount + " SMs active" [+ "; grid≤N blocks" when capped]
 ```
 
 Note: `estimated_sm_utilization` is on `KernelAnalysis` only. `OccupancyModelResult` does not expose it directly.
-This estimate assumes the launch has enough total blocks to fill the predicted number of SMs; without a grid-size hint, under-filled grids (e.g. 4 blocks on a 132-SM device) cannot be distinguished.
+Without `gridBlocks`, the string still assumes enough blocks exist to reach the occupancy-derived participation; pass `grid=` in the launch spec (or VS Code launch hints) to model small grids (I3).
 
 **SM count name-heuristic SKU rules (H100):** The H100 has two distinct enabled SM counts depending on the physical form factor. The heuristic in `inferSmCountFromGpuName` matches in priority order:
 
@@ -488,8 +511,10 @@ This estimate assumes the launch has enough total blocks to fill the predicted n
 
 | Ratio | Formula | Threshold used |
 |-------|---------|---------------|
-| `sharedToGlobal` | `sharedOps / globalOps` | > 1.5 → strong reuse |
-| `computeToMemory` | `computeOps / (globalOps + 1)` | > 8: tiled; > 4: compute-heavy; < 2: streaming |
+| `sharedToGlobal` | `sharedOps / globalOps`, **+∞** when `globalOps = 0` and `sharedOps > 0` (I1) | > 1.5 → strong reuse |
+| `computeToMemory` | `computeOps / (globalOps + 1)` when `globalOps > 0`; **+∞** when `globalOps = 0` and `computeOps > 0` (I1) | > 8: tiled; > 4: compute-heavy; < 2: streaming |
+
+Exported `shared_to_global_ratio` / `compute_to_memory_ratio` replace **+∞** with a JSON-safe sentinel (`1e12`) so webviews do not receive `null` from `JSON.stringify(Infinity)`.
 | `branchDensity` | `branches / (computeOps + 1)` | > 0.10 → control-heavy |
 | `branchPerMem` | `branches / (globalOps + 1)` | > 0.08 (+ low compute) → control-heavy |
 | `barrierDensity` | `barriers / (computeOps + 1)` | > 0.02 → sync-heavy |
