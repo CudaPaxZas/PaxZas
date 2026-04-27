@@ -49,8 +49,9 @@ const MUL = /(?<![A-Za-z0-9_.])mul\./g;
 const BARRIER = /\bbar\.sync\b/g;
 const REG_LINE = /^\s*\.reg\b/;
 const BRA_OPCODE = /\bbra(?:\.[A-Za-z0-9_]+)*\b/g;
-const LABEL_DEF = /^\s*(\$?L[A-Za-z0-9_]+)\s*:/;
-const BRA_TARGET = /\bbra(?:\.[A-Za-z0-9_]+)*\s+(\$?L[A-Za-z0-9_]+)\s*;/g;
+// I10: accept non-LLVM PTX labels too (e.g. BB0_1:, .Ltmp0:, $foo.bar:).
+const LABEL_DEF = /^\s*([A-Za-z$._][A-Za-z0-9$._]*)\s*:/;
+const BRA_TARGET = /\bbra(?:\.[A-Za-z0-9_]+)*\s+([A-Za-z$._][A-Za-z0-9$._]*)\s*;/g;
 
 export function ptxFeaturesAsDict(f: PtxInstructionFeatures): Record<string, number> {
   return {

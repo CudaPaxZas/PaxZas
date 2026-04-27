@@ -185,6 +185,7 @@ export const GPU_SM_CONFIGS: Record<GpuComputeCapabilityKey, GpuArchLimits> = {
    * Blackwell CC 10.0 (e.g. B200/GB200, `.target sm_100`, SMI compute_cap 10.0).
    * Occupancy-related limits from NVIDIA Blackwell Tuning Guide §1.4.1.1 (concurrent warps 64,
    * blocks/SM 32, 228 KB shared/SM, 64K 32-bit regs/SM). Max threads/SM = 64×32 = 2048.
+   * Note: 228 KB is the user-allocatable shared-memory ceiling used by occupancy tooling.
    * regAllocUnitPerWarp / sharedMemAllocUnit / minSharedPerBlockAlloc follow Hopper-style 256 B
    * (verify via CUDA Programming Guide — compute capabilities if you need exact granularity).
    */
@@ -205,6 +206,7 @@ export const GPU_SM_CONFIGS: Record<GpuComputeCapabilityKey, GpuArchLimits> = {
    * Blackwell consumer CC 12.0 (RTX 50 series / RTX PRO 4000 Blackwell, `.target sm_120`,
    * SMI compute_cap 12.0). Occupancy limits match GB20x architecture: 48 warps/SM, 1536
    * threads/SM, 24 blocks/SM, 65536 32-bit regs/SM, 100 KB shared/SM.
+   * Note: this is user-allocatable shared memory (architectural total is higher).
    * (verify via CUDA Programming Guide — compute capabilities if you need exact granularity).
    */
   "12.0": {
@@ -384,7 +386,11 @@ const NAME_TO_SM_COUNT_RULES: readonly NameToSmCountRule[] = [
   
   // Consumer RTX 40 series (Ada Lovelace, CC 8.9)
   { pattern: /\bRTX\s*4090\b/i, smCount: 128 },
+  // SUPER must be checked before base 4080 (I6, first-match wins).
+  { pattern: /\bRTX\s*4080\s*SUPER\b/i, smCount: 80 },
   { pattern: /\bRTX\s*4080\b/i, smCount: 76 },
+  // Ti SUPER must be checked before Ti and base 4070.
+  { pattern: /\bRTX\s*4070\s*Ti\s*SUPER\b/i, smCount: 66 },
   { pattern: /\bRTX\s*4070\s*Ti\b/i, smCount: 60 },
   { pattern: /\bRTX\s*4070\b/i, smCount: 46 },
   

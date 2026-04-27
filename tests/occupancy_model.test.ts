@@ -270,6 +270,15 @@ describe("occupancy_model — gap fixes", () => {
 // improvement IS achievable) but the caller needs to know the new bottleneck.
 
 describe("B7 – register pressure margin limiting-factor switch", () => {
+  it("I2 – register_pressure_margin aligns to allocation granule", () => {
+    // Ampere: reg granule = regAllocUnitPerWarp / warpSize = 256/32 = 8 regs.
+    const result = findRegisterPressureMargin(256, 0, 165, AMPERE_LIKE_DEFAULT);
+    if (result === undefined) {
+      return;
+    }
+    expect(result.margin % 8).toBe(0);
+  });
+
   it("limitingSwitchesTo is undefined when bottleneck stays 'registers'", () => {
     // 256 threads, 0 shared, 160 regs — register-limited on Ampere default.
     // Reducing regs should keep registers as the limiting factor at 'best'.

@@ -72,4 +72,18 @@ describe("ptx_features (Python parity)", () => {
     // Exactly 2 stand-alone mul instructions
     expect(f.mul).toBe(2);
   });
+
+  it("I10 – counts backward loops for BB-style and dotted labels", () => {
+    const body = `
+BB0_1:
+  add.s32 %r1, %r1, 1;
+  bra BB0_1;
+.Ltmp0:
+  add.s32 %r2, %r2, 1;
+  bra .Ltmp0;
+`;
+    const f = extractInstructionFeatures(body);
+    expect(f.branches).toBe(2);
+    expect(f.loops).toBe(2);
+  });
 });

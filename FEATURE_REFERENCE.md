@@ -25,7 +25,7 @@ regex scans over the kernel body text.
 | `barrier` | `number` | Count `bar.sync` instructions | `/\bbar\.sync\b/g` |
 | `reg_decl_lines` | `number` | Count `.reg` declaration lines | `/^\s*\.reg\b/` |
 | `branches` | `number` | Count `bra` opcodes (all variants) | `/\bbra(?:\.[A-Za-z0-9_]+)*\b/g` |
-| `loops` | `number` | Count backward branch edges (label appears before the `bra` target) | Two-pass: labels → line numbers, then `bra` targets with label line < current line |
+| `loops` | `number` | Count backward branch edges (label appears before the `bra` target) | Two-pass: labels → line numbers, then `bra` targets with label line < current line. Label grammar accepts LLVM-style and non-LLVM-style names (e.g. `L0:`, `BB0_1:`, `.Ltmp0:`, `$foo.bar:`). |
 
 ### Derived Heuristics (computed from raw fields)
 
@@ -51,6 +51,9 @@ SASS is the final hardware assembly produced by `ptxas`.  A single forward scan
 over the `cuobjdump --dump-sass` output processes every instruction line.
 Predicate guards (`@P0`, `@!P1`) are stripped before opcode matching so that
 predicated branches are never silently dropped.
+Register-index extraction intentionally scans the raw line with `R\d+`; this is
+robust for both plain operands (`R12`) and indexed constant-bank operands
+(`c[0x0][R4]`) while ignoring numeric literals (`0x10`).
 
 ### Extraction Entry Point
 
@@ -410,6 +413,7 @@ occupancy           = active_warps_per_sm / smMaxWarps   [0.0 – 1.0]
 **`KernelAnalysis` fields:** `occupancy_class` = `"low"` (<0.30) | `"medium"` (<0.60) | `"high"` (≥0.60); `register_pressure_margin`; `next_occupancy_class`; `next_limiting_factor`; `shared_mem_pressure_margin`; `next_occupancy_class_shared`; `next_limiting_factor_shared`; `warp_metrics`; `waste_metrics` (unused resource fractions per SM).
 
 `register_pressure_margin` is only populated when `limiting_factor = "registers"` and a higher occupancy tier exists; it reports regs/thread to shed to reach `next_occupancy_class`.
+The margin is quantized to the hardware allocation granularity `regAllocUnitPerWarp / warpSize` (8 regs/thread on modern NVIDIA), so the recommendation lines up with what `ptxas` can actually realize.
 
 `next_limiting_factor` is set alongside `register_pressure_margin` when shedding the margin regs causes a **different resource to become the new bottleneck** (e.g. `"shared_mem"`).  The tier improvement is still achievable — the register-reduction advice remains valid — but the field signals that a second optimisation will be needed to improve occupancy further.
 
@@ -442,6 +446,7 @@ estimated_sm_utilization = round(occupancy × smCount) + " / " + smCount + " SMs
 ```
 
 Note: `estimated_sm_utilization` is on `KernelAnalysis` only. `OccupancyModelResult` does not expose it directly.
+This estimate assumes the launch has enough total blocks to fill the predicted number of SMs; without a grid-size hint, under-filled grids (e.g. 4 blocks on a 132-SM device) cannot be distinguished.
 
 **SM count name-heuristic SKU rules (H100):** The H100 has two distinct enabled SM counts depending on the physical form factor. The heuristic in `inferSmCountFromGpuName` matches in priority order:
 
@@ -451,6 +456,16 @@ Note: `estimated_sm_utilization` is on `KernelAnalysis` only. `OccupancyModelRes
 | `H100 … NVL` | 114 | H100 NVL |
 | `H100` (generic fallback) | 132 | H100 SXM5 |
 | `H200` | 132 | H200 SXM |
+
+**Additional consumer-name heuristic examples (first-match order):**
+
+| nvidia-smi name pattern | SM count |
+|------------------------|----------|
+| `RTX 4080 SUPER` | 80 |
+| `RTX 4080` | 76 |
+| `RTX 4070 Ti SUPER` | 66 |
+| `RTX 4070 Ti` | 60 |
+| `RTX 4070` | 46 |
 
 ---
 

@@ -29,11 +29,14 @@ Supported architectures:
 | `gb200` | Blackwell GB200 NVL | sm_100 |
 | `blackwell-consumer-default` | Blackwell consumer | sm_120 |
 
+When direct SM-count telemetry is unavailable, auto-mode also uses curated GPU-name heuristics (including `RTX 4080 SUPER` and `RTX 4070 Ti SUPER`) for better occupancy estimates.
+
 ### Occupancy Model
 - Computes warp occupancy, blocks per SM, and the **limiting factor** (registers, shared memory, threads, or block limit) for any block size
 - **Sweep charts** — occupancy, blocks/SM, and per-constraint resource limits plotted across all valid block sizes
 - **Waste metrics** — unused threads, warps, registers, and shared bytes per SM at the current configuration
 - Register what-if: how many fewer registers to reach the next occupancy tier
+- Register margin recommendations are aligned to real per-warp register allocation granularity (actionable `__launch_bounds__` targets)
 - **Shared-memory what-if** — when shared memory is the limiting factor, an actionable "shed N bytes/block to reach next tier" recommendation is offered (parallel to the register-side margin)
 - Launch parameter inference from PTX hints and optional SASS register index
 - Low-level reference: [**Occupancy Model Synthesis**](FEATURE_REFERENCE.md#part-5--occupancy-model-synthesis)

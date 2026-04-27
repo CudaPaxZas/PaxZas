@@ -4,6 +4,8 @@ import { inferSmCountFromGpuName } from "../src/analyzer/gpu_spec";
 describe("gpu_spec SM-count name fallback", () => {
   it("infers known model names", () => {
     expect(inferSmCountFromGpuName("NVIDIA GeForce RTX 4090")).toBe(128);
+    expect(inferSmCountFromGpuName("NVIDIA GeForce RTX 4080 SUPER")).toBe(80);
+    expect(inferSmCountFromGpuName("NVIDIA GeForce RTX 4070 Ti SUPER")).toBe(66);
     expect(inferSmCountFromGpuName("NVIDIA A100-SXM4-80GB")).toBe(108);
     expect(inferSmCountFromGpuName("NVIDIA H100 PCIe")).toBe(114); // 114 SMs — GH100 with 2 disabled GPCs
   });

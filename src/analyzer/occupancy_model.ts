@@ -532,13 +532,22 @@ export function findRegisterPressureMargin(
     return undefined;
   }
 
-  let lo = 1;
-  let hi = registersPerThread - 1;
+  // I2: search in real allocation granularity steps, not 1-reg increments.
+  // Registers are allocated per warp in `regAllocUnitPerWarp` chunks, so the
+  // effective per-thread step is `regAllocUnitPerWarp / warpSize` (8 regs on
+  // modern architectures with 256/32). Returning a non-granular margin would
+  // be optimistic by up to one step.
+  const granule = Math.max(1, Math.floor(spec.regAllocUnitPerWarp / spec.warpSize));
+  const effectiveCurrent =
+    Math.floor(registersPerThread / granule) * granule;
+  const maxCandidate = Math.floor((registersPerThread - 1) / granule) * granule;
+  let lo = granule;
+  let hi = maxCandidate;
   let best: number | undefined;
   let bestClass: string | undefined;
 
   while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
+    const mid = Math.floor((lo + hi) / (2 * granule)) * granule;
     const trial = computeOccupancyBreakdown(
       threadsPerBlock,
       sharedMemPerBlock,
@@ -550,9 +559,9 @@ export function findRegisterPressureMargin(
     if (improved) {
       best = mid;
       bestClass = trialClass;
-      lo = mid + 1;
+      lo = mid + granule;
     } else {
-      hi = mid - 1;
+      hi = mid - granule;
     }
   }
 
@@ -577,7 +586,15 @@ export function findRegisterPressureMargin(
       ? trialAtBest.limiting_factor
       : undefined;
 
-  return { margin: registersPerThread - best, nextClass: bestClass, limitingSwitchesTo };
+  const margin = Math.max(0, effectiveCurrent - best);
+  if (margin === 0) {
+    return undefined;
+  }
+  return {
+    margin,
+    nextClass: bestClass,
+    limitingSwitchesTo,
+  };
 }
 
 /**

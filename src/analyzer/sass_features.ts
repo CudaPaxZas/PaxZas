@@ -546,6 +546,9 @@ function classifyOpcode(
 }
 
 function updateRegisterUsage(line: string, f: SassInstructionFeatures): void {
+  // I4: this scans the raw line intentionally (not opcode-trimmed).
+  // `R\d+` is robust against constant-bank literals like `c[0x0][0x10]` and
+  // still captures indexed operands such as `c[0x0][R4]`.
   REGISTER_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = REGISTER_RE.exec(line)) !== null) {
