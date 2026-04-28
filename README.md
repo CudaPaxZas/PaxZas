@@ -109,7 +109,7 @@ When direct SM-count telemetry is unavailable, auto-mode also uses curated GPU-n
 | **Paxzas: Kernel Analysis** | Opens the full 10-tab analysis panel |
 | **Paxzas: Analyze CUDA File with Launch Spec** | Same analysis with optional `threads=…,shared=…,regs=…,grid=…` overrides (grid caps the SM-util estimate when device SM count is known) |
 
-Both commands are available from the **Command Palette**, **editor title bar**, **editor right-click**, and **Explorer right-click** on `.ptx`, `.cu`, and `.sass` files.
+Both commands are available from the **Command Palette**, **editor title bar**, **editor right-click**, and **Explorer right-click** on `.ptx`, and `.sass` files.
 
 ---
 
