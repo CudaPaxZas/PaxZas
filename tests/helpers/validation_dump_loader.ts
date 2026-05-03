@@ -13,8 +13,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { expect } from "vitest";
-import { findKernelBody } from "../../src/analyzer/ptx_features";
+import {
+  extractInstructionFeatures,
+  findKernelBody,
+} from "../../src/analyzer/ptx_features";
+import { listPtxEntryNames } from "../../src/analyzer/ptx_parse";
 import { extractSassFeatures } from "../../src/analyzer/sass_features";
+import type { PtxInstructionFeatures } from "../../src/analyzer/ptx_features";
 import type { SassInstructionFeatures } from "../../src/analyzer/sass_features";
 
 const testsDir = path.resolve(__dirname, "..");
@@ -121,6 +126,17 @@ export function catalogSassFeatures(
   return { f, source: "inline" };
 }
 
+/** All `.entry` names found across loaded PTX modules (sorted, deduped). */
+export function getValidationPtxEntries(): string[] {
+  const seen = new Set<string>();
+  for (const m of getValidationPtxModules()) {
+    for (const name of listPtxEntryNames(m)) {
+      seen.add(name);
+    }
+  }
+  return Array.from(seen).sort();
+}
+
 /**
  * When PTX artifacts exist, require at least one module to contain a `.entry`
  * matching `kernelSubstring`. No-op if no PTX files (e.g. CI without dumps).
@@ -130,16 +146,37 @@ export function expectCatalogPtxKernel(kernelSubstring: string): void {
   if (modules.length === 0) {
     return;
   }
-  let hit = false;
   for (const m of modules) {
     const [, body] = findKernelBody(m, kernelSubstring);
     if (body && body.replace(/\s/g, "").length > 0) {
-      hit = true;
-      break;
+      return;
     }
   }
-  expect(
-    hit,
-    `expected PTX under tests/data/ptx (or PAXZAS_VALIDATION_PTX*) to define a kernel matching "${kernelSubstring}"`
-  ).toBe(true);
+  const available = getValidationPtxEntries();
+  const preview = available.slice(0, 10).join(", ");
+  const tail = available.length > 10 ? `, … (+${available.length - 10})` : "";
+  expect.fail(
+    `expected PTX under tests/data/ptx (or PAXZAS_VALIDATION_PTX*) to define a kernel ` +
+      `matching "${kernelSubstring}"; loaded ${modules.length} module(s) with ` +
+      `${available.length} .entry name(s)` +
+      (available.length > 0 ? ` [${preview}${tail}]` : "")
+  );
+}
+
+/**
+ * Real-PTX features for `kernelSubstring`, or `undefined` when no loaded module
+ * contains a matching `.entry`. Tests use this for PTX-side counters
+ * (`fma`, `barrier`, `branches`, `loops`) the catalog ties to a kernel; when
+ * real dumps are missing they skip the PTX-side assertions.
+ */
+export function catalogPtxFeatures(
+  kernelSubstring: string
+): PtxInstructionFeatures | undefined {
+  for (const m of getValidationPtxModules()) {
+    const [name, body] = findKernelBody(m, kernelSubstring);
+    if (name && body && body.replace(/\s/g, "").length > 0) {
+      return extractInstructionFeatures(body);
+    }
+  }
+  return undefined;
 }

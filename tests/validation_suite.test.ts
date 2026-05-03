@@ -16,6 +16,7 @@
 import { describe, expect, it } from "vitest";
 import { sassHx } from "./helpers/ir_fixtures";
 import {
+  catalogPtxFeatures,
   catalogSassFeatures,
   expectCatalogPtxKernel,
 } from "./helpers/validation_dump_loader";
@@ -70,8 +71,14 @@ describe("KERNEL_CATALOG — compute_heavy (kernel_suite.cu)", () => {
       expect(f.arithmetic_ops).toBe(32);
       expect(f.global_loads).toBe(0);
     } else {
-      expect(f.arithmetic_ops).toBeGreaterThanOrEqual(16);
+      // `#pragma unroll 64` => kernel issues many FFMA per element.
+      expect(f.arithmetic_ops).toBeGreaterThanOrEqual(32);
       expect(f.global_loads).toBeGreaterThanOrEqual(1);
+    }
+    const ptx = catalogPtxFeatures("compute_heavy");
+    if (ptx) {
+      // Catalog ties this kernel to a high `flops_proxy` driven by FMA count.
+      expect(ptx.fma).toBeGreaterThanOrEqual(16);
     }
   });
 });
@@ -90,6 +97,10 @@ describe("KERNEL_CATALOG — tiled_add (kernel_suite.cu)", () => {
     expect(f.shared_stores).toBeGreaterThanOrEqual(1);
     expect(f.barrier).toBeGreaterThanOrEqual(1);
     expect(f.arithmetic_ops).toBeGreaterThanOrEqual(1);
+    const ptx = catalogPtxFeatures("tiled_add");
+    if (ptx) {
+      expect(ptx.barrier).toBeGreaterThanOrEqual(1);
+    }
   });
 });
 
@@ -106,6 +117,11 @@ describe("KERNEL_CATALOG — reduction (kernel_suite.cu)", () => {
     expect(f.shared_loads).toBeGreaterThanOrEqual(1);
     expect(f.shared_stores).toBeGreaterThanOrEqual(1);
     expect(f.barrier).toBeGreaterThanOrEqual(2);
+    const ptx = catalogPtxFeatures("reduction");
+    if (ptx) {
+      // Tree-reduction kernel: blockDim/2 → 1 sync per round, log2(256)=8 rounds.
+      expect(ptx.barrier).toBeGreaterThanOrEqual(2);
+    }
   });
 });
 
@@ -193,6 +209,10 @@ describe("KERNEL_CATALOG §6 — branchy_divergent", () => {
       expect(f.branch).toBe(12);
     } else {
       expect(f.branch).toBeGreaterThanOrEqual(4);
+    }
+    const ptx = catalogPtxFeatures("branchy_divergent");
+    if (ptx) {
+      expect(ptx.branches).toBeGreaterThanOrEqual(4);
     }
   });
 });
