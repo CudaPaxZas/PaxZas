@@ -2,7 +2,7 @@
 
 **PaxZas** is a **semantic GPU performance analysis engine**: it turns NVIDIA **PTX** and **SASS** into architecture-aware performance signals—occupancy limits, memory posture, control and tensor patterns, stall-oriented diagnosis, and instruction mix—not just raw opcode tallies. Analysis is **static** (no kernel execution), runs **inside VS Code**, and needs **no Python, no network, and no GPU**. Point the extension at a `.ptx` or `.sass` file and inspect results across GPU presets from Volta through Blackwell.
 
-The published VS Code extension is branded **Paxzas** in command IDs and the marketplace; this repository and product name are **PaxZas**.
+The published VS Code extension appears in the marketplace as **PaxZas Engine**; command IDs still use the `paxzas.*` prefix. The repository and product name are **PaxZas**.
 
 ## Analyzing a `.sass` file
 

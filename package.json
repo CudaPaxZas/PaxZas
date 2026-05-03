@@ -1,7 +1,7 @@
 {
   "name": "paxzas-vscode",
-  "displayName": "Paxzas CUDA Analyzer",
-  "description": "Local PTX/SASS fast analysis inside VS Code (no Python, no network).",
+  "displayName": "PaxZas Engine",
+  "description": "Semantic GPU Performance Analysis Engine — static PTX/SASS analysis inside VS Code (no Python, no network).",
   "version": "1.0.0",
   "publisher": "CudaPaxZas",
   "repository": {
@@ -86,7 +86,7 @@
       ]
     },
     "configuration": {
-      "title": "Paxzas CUDA Analyzer",
+      "title": "PaxZas Engine",
       "properties": {
         "paxzas.gpuPreset": {
           "type": "string",
