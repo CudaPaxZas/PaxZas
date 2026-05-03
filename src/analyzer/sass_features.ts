@@ -338,11 +338,20 @@ function classifyOpcode(
       opcode.includes(".8")
     ) {
       f.ldg_8 += 1;
+    } else {
+      // cuobjdump frequently emits LDG.E / LDG.E.CONSTANT without explicit .32 /
+      // .F32 width tokens even though the compiler lowered a scalar/global load.
+      // Bucket those as 32-bit so typed counters align with global_loads and
+      // estimateSassBytes() does not rely on the unknown-width fallback.
+      f.ldg_32 += 1;
     }
-    if (opcode.includes(".CG")) {
+    // Cache-policy hints on global loads — newer toolchains rename some tokens:
+    //   .CG / .STRONG.GPU — global-l1 / "last use" style cache behavior
+    //   .CS / .EF          — streaming / eviction-first loads (Ampere+)
+    if (opcode.includes(".CG") || opcode.includes(".STRONG")) {
       f.cg_loads += 1;
     }
-    if (opcode.includes(".CS")) {
+    if (opcode.includes(".CS") || opcode.includes(".EF")) {
       f.cs_loads += 1;
     }
   } else if (opcode.startsWith("STG")) {
@@ -380,6 +389,9 @@ function classifyOpcode(
       opcode.includes(".8")
     ) {
       f.stg_8 += 1;
+    } else {
+      // Same reasoning as LDG: bare STG.E from cuobjdump is usually a 32-bit write.
+      f.stg_32 += 1;
     }
   } else if (opcode.startsWith("LDS")) {
     f.shared_loads += 1;
