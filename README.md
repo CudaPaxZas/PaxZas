@@ -1,6 +1,8 @@
-# Paxzas CUDA Analyzer
+# PaxZas — Semantic GPU Performance Analysis Engine
 
-Static analysis of NVIDIA CUDA kernels directly inside VS Code — **no Python, no network, no GPU required**. Point it at a PTX or SASS file and get occupancy, memory posture, bottleneck diagnosis, and instruction mix instantly, across every GPU architecture from Volta to Blackwell.
+**PaxZas** is a **semantic GPU performance analysis engine**: it turns NVIDIA **PTX** and **SASS** into architecture-aware performance signals—occupancy limits, memory posture, control and tensor patterns, stall-oriented diagnosis, and instruction mix—not just raw opcode tallies. Analysis is **static** (no kernel execution), runs **inside VS Code**, and needs **no Python, no network, and no GPU**. Point the extension at a `.ptx` or `.sass` file and inspect results across GPU presets from Volta through Blackwell.
+
+The published VS Code extension is branded **Paxzas** in command IDs and the marketplace; this repository and product name are **PaxZas**.
 
 ## Analyzing a `.sass` file
 
