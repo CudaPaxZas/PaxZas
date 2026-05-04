@@ -2,7 +2,7 @@
   "name": "paxzas-vscode",
   "displayName": "PaxZas Engine",
   "description": "Semantic GPU Performance Analysis Engine — static PTX/SASS analysis inside VS Code (no Python, no network).",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "CudaPaxZas",
   "repository": {
     "type": "git",

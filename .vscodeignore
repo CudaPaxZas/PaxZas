@@ -10,5 +10,6 @@ ChatGPT Image*.png
 build-vsix.sh
 SWEEP_UI.md
 FEATURE_REFERENCE.md
+NEXT_VERSION.md
 vitest.config.mjs
 *.vsix
